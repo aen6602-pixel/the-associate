@@ -1,0 +1,9 @@
+.venv/
+.cache/
+.env
+__pycache__/
+*.pyc
+outputs/
+*.xlsx
+!templates/*.xlsx
+.streamlit/secrets.toml

@@ -1,0 +1,19 @@
+# 에이전트 두뇌 & UI
+google-genai          # Gemini (무료티어, 기본)
+anthropic             # Claude (선택)
+streamlit
+
+# HTTP / 파싱
+requests
+truststore            # 사내 TLS 검사 환경: OS 인증서 저장소 사용
+python-dotenv
+lxml
+beautifulsoup4
+
+# 데이터 처리 & 엑셀
+pandas
+openpyxl
+
+# 시장 데이터 (키 불필요) — 무거워서 별도 설치 가능
+# pykrx        # 한국 주가/시총
+# yfinance     # 미/일/대만 주가
