@@ -15,7 +15,7 @@ LLM_PROVIDER=gemini
 
 # Google Gemini (무료티어): https://aistudio.google.com/apikey
 GEMINI_API_KEY={key}
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-flash-latest
 
 # Anthropic Claude (선택): https://console.anthropic.com
 ANTHROPIC_API_KEY=

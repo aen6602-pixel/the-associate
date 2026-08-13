@@ -1,0 +1,8 @@
+# The Associate — dark "IB terminal" theme
+[theme]
+base = "dark"
+primaryColor = "#F0B429"          # amber accent (Bloomberg-terminal nod)
+backgroundColor = "#0A0E17"        # near-black navy
+secondaryBackgroundColor = "#141B26"
+textColor = "#E4E7EB"
+font = "sans serif"

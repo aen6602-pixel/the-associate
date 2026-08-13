@@ -1,9 +1,16 @@
 .venv/
 .cache/
 .env
+sessions/
 __pycache__/
 *.pyc
 outputs/
 *.xlsx
 !templates/*.xlsx
 .streamlit/secrets.toml
+
+# Claude Code 로컬 설정 (개인 권한/락 파일)
+.claude/
+
+# 스크래치 · 디버그 덤프 (_mops_raw.txt, _sec_debug.txt 등)
+_*.txt

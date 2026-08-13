@@ -26,9 +26,10 @@ class SourceType:
     AUTHORITATIVE = "authoritative"   # 정부·규제기관·중앙은행·거래소 공식 (DART, SEC, ECOS, FRED, KRX, EDINET)
     REFERENCE = "reference"           # 업계 표준 참조 데이터셋 (Damodaran 등)
     COMPUTED = "computed"             # 우리 엔진이 다른 Value 로부터 계산 (WACC, EV, 멀티플)
+    ASSUMPTION = "assumption"         # 사용자가 명시적으로 입력한 가정 (성장률·마진·terminal g 등)
     LLM_ESTIMATE = "llm_estimate"     # 소스가 없어 LLM 이 추정 — 반드시 이 라벨
 
-    ALL = {AUTHORITATIVE, REFERENCE, COMPUTED, LLM_ESTIMATE}
+    ALL = {AUTHORITATIVE, REFERENCE, COMPUTED, ASSUMPTION, LLM_ESTIMATE}
 
 
 @dataclass
@@ -64,14 +65,18 @@ class Value:
     unit: str
     provenance: Provenance
     label: Optional[str] = None
+    extras: Optional[dict[str, "Value"]] = None  # 함께 보여줄 연관 수치 (예: DCF의 EV·지분가치)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "value": self.value,
             "unit": self.unit,
             "label": self.label,
             "provenance": self.provenance.to_dict(),
         }
+        if self.extras:
+            d["extras"] = {k: v.to_dict() for k, v in self.extras.items()}
+        return d
 
     def __repr__(self) -> str:
         lbl = f"{self.label}=" if self.label else ""

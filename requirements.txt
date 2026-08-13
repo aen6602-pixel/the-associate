@@ -1,5 +1,6 @@
 # 에이전트 두뇌 & UI
 google-genai          # Gemini (무료티어, 기본)
+openai                # GPT (선택)
 anthropic             # Claude (선택)
 streamlit
 
