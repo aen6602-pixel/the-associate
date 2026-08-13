@@ -30,17 +30,26 @@ def _safe_id(sid: str) -> str:
     return sid if re.fullmatch(r"[\w.\-]+", str(sid or "")) else ""
 
 
-def _path(sid: str) -> Path | None:
+def _user_dir(user_key: str) -> Path:
+    """사용자별 세션 폴더. 멀티유저(배포) 시 남의 대화가 섞이지 않도록 격리한다.
+    user_key 는 app 에서 로그인 이메일 해시(로컬은 'local')로 넘어온다."""
+    uk = user_key if re.fullmatch(r"[\w.\-]+", str(user_key or "")) else "local"
+    d = SESSIONS_DIR / uk
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _path(sid: str, user_key: str) -> Path | None:
     sid = _safe_id(sid)
-    return SESSIONS_DIR / f"{sid}.json" if sid else None
+    return _user_dir(user_key) / f"{sid}.json" if sid else None
 
 
-def save_session(sid: str, messages: list[dict], title: str | None = None) -> None:
+def save_session(sid: str, messages: list[dict], user_key: str, title: str | None = None) -> None:
     """세션 전체를 덮어써 저장한다. messages 는 [{"role","content"}, ...]."""
-    p = _path(sid)
+    p = _path(sid, user_key)
     if p is None or not messages:
         return
-    existing = load_session(sid)
+    existing = load_session(sid, user_key)
     created_at = (existing or {}).get("created_at") or _now_iso()
     auto_title = title or (existing or {}).get("title") or _make_title(messages)
     rec = {
@@ -57,8 +66,8 @@ def _make_title(messages: list[dict]) -> str:
     return (t[:18] + "…") if len(t) > 18 else (t or "새 대화")
 
 
-def load_session(sid: str) -> dict | None:
-    p = _path(sid)
+def load_session(sid: str, user_key: str) -> dict | None:
+    p = _path(sid, user_key)
     if p is None or not p.exists():
         return None
     try:
@@ -67,10 +76,10 @@ def load_session(sid: str) -> dict | None:
         return None
 
 
-def list_sessions() -> list[dict]:
-    """최신순. 미리보기(첫 질문)와 메타만 포함 — 목록 렌더용."""
+def list_sessions(user_key: str) -> list[dict]:
+    """최신순. 미리보기(첫 질문)와 메타만 포함 — 목록 렌더용. 해당 사용자 폴더만 조회."""
     out = []
-    for p in SESSIONS_DIR.glob("*.json"):
+    for p in _user_dir(user_key).glob("*.json"):
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -84,8 +93,8 @@ def list_sessions() -> list[dict]:
     return out
 
 
-def delete_session(sid: str) -> bool:
-    p = _path(sid)
+def delete_session(sid: str, user_key: str) -> bool:
+    p = _path(sid, user_key)
     if p is None or not p.exists():
         return False
     try:

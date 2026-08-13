@@ -1,20 +1,20 @@
-# 에이전트 두뇌 & UI
-google-genai          # Gemini (무료티어, 기본)
-openai                # GPT (선택)
-anthropic             # Claude (선택)
-streamlit
+# 에이전트 두뇌 & UI  (버전 고정: 클라우드 배포가 로컬과 동일하게 빌드되도록)
+google-genai==2.17.0    # Gemini (무료티어, 로컬 기본)
+openai==2.53.0          # GPT (배포 기본 두뇌)
+anthropic==0.120.2      # Claude (로컬 CLI 경로용, 배포에선 미사용)
+streamlit==1.61.1       # 1.42+ 필요 (st.context.headers 로 로그인 사용자 식별)
 
 # HTTP / 파싱
-requests
-truststore            # 사내 TLS 검사 환경: OS 인증서 저장소 사용
-python-dotenv
-lxml
-beautifulsoup4
+requests==2.34.2
+truststore==0.10.4      # 사내 TLS 검사 환경용. 클라우드에선 불필요하나 config 의 try/except 로 무해
+python-dotenv==1.2.2
+lxml==6.1.1
+beautifulsoup4==4.15.0
 
 # 데이터 처리 & 엑셀
-pandas
-openpyxl
+pandas==2.3.3
+openpyxl==3.1.5
 
-# 시장 데이터 (키 불필요) — 무거워서 별도 설치 가능
+# 시장 데이터 (키 불필요) — 무거워서 별도 설치. 현재 코드 경로에선 미사용(네이버 우회 사용)
 # pykrx        # 한국 주가/시총
 # yfinance     # 미/일/대만 주가

@@ -7,10 +7,38 @@ from __future__ import annotations
 
 import streamlit as st
 
+# ── Streamlit Cloud 시크릿 → 환경변수 (config import 전에 실행해야 함) ──────
+# 클라우드는 키를 st.secrets 로 주입하는데 core.config 는 import 시점에 os.getenv 로만
+# 읽는다. config 가 로드되기 전에 secrets 를 os.environ 으로 옮겨준다. 로컬(.env)엔 무영향.
+try:
+    import os as _os
+    for _k, _v in st.secrets.items():
+        _os.environ.setdefault(_k, str(_v))
+except Exception:
+    pass
+
 from core import config, sources, history as hist
 from agent import brain
 
 st.set_page_config(page_title="The Associate", page_icon="📊", layout="wide")
+
+
+# ── 로그인 사용자 식별 (세션 격리용) ──────────────────────────────
+def _current_user_key() -> str:
+    """Streamlit Community Cloud 비공개 앱은 인증 이메일을 X-Streamlit-User 헤더로 준다
+    (1.42+ 에선 st.user 가 비어 있음). 이를 해시해 사용자별 세션 폴더 키로 쓴다.
+    로컬/미인증 실행이면 'local'."""
+    try:
+        email = st.context.headers.get("X-Streamlit-User")
+    except Exception:
+        email = None
+    if not email:
+        return "local"
+    import hashlib
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:16]
+
+
+USER_KEY = _current_user_key()
 
 # ── 세션 상태 초기화 (첫 로드 시 1회) ──────────────────────────────
 if "session_id" not in st.session_state:
@@ -162,7 +190,7 @@ with st.sidebar:
     if st.button("＋  New session", use_container_width=True):
         _switch_session(hist.new_session_id(), [])
 
-    _sessions = hist.list_sessions()
+    _sessions = hist.list_sessions(USER_KEY)
     if not _sessions:
         st.caption("No conversations yet — send a question and it'll appear here.")
     else:
@@ -175,12 +203,12 @@ with st.sidebar:
                     if st.button(("📍 " if is_active else "") + s["title"],
                                 key=f"sess_{s['id']}", use_container_width=True,
                                 type="primary" if is_active else "secondary"):
-                        rec = hist.load_session(s["id"])
+                        rec = hist.load_session(s["id"], USER_KEY)
                         if rec:
                             _switch_session(s["id"], rec["messages"])
                 with c2:
                     if st.button("🗑", key=f"del_{s['id']}"):
-                        hist.delete_session(s["id"])
+                        hist.delete_session(s["id"], USER_KEY)
                         if is_active:
                             _switch_session(hist.new_session_id(), [])
                         else:
@@ -190,9 +218,15 @@ with st.sidebar:
     st.markdown("<div class='assoc-sec'>Data Sources</div>", unsafe_allow_html=True)
     st.caption("Click any item for details. 🟢 official 🔵 reference · ✅ live ⬜ key needed 🔜 planned")
 
-    # 두뇌(LLM) 선택 — 클릭해서 제공사/모델 전환
-    _provider_keys = list(config.LLM_PROVIDERS.keys())
+    # 두뇌(LLM) 선택 — 클릭해서 제공사/모델 전환.
+    # 배포(DEPLOY_MODE)에선 claude CLI 방식(anthropic)은 클라우드에 CLI 가 없어 동작 불가 → 목록에서 숨김.
+    _provider_keys = [k for k, v in config.LLM_PROVIDERS.items()
+                      if not (config.DEPLOY_MODE and v.get("auth_mode") == "cli")]
     _provider_labels = {k: v["label"] for k, v in config.LLM_PROVIDERS.items()}
+    # 이전에 고른 provider 가 숨겨졌으면(예: 배포 후 세션에 anthropic 잔존) 첫 항목으로 리셋 → index 오류 방지.
+    if st.session_state.llm_provider not in _provider_keys:
+        st.session_state.llm_provider = _provider_keys[0]
+        st.session_state.llm_model = config.LLM_PROVIDERS[_provider_keys[0]]["default_model"]
     with st.expander(
         f"🧠 Engine: {_llm['label']} · `{_llm['model']}`  {'✅' if _llm['key'] else '⬜'}",
         expanded=not bool(_llm["key"]),
@@ -359,5 +393,5 @@ if question:
     st.session_state.history.append(
         {"role": "assistant", "content": final_text, "trace": trace_events}
     )
-    hist.save_session(st.session_state.session_id, st.session_state.history)
+    hist.save_session(st.session_state.session_id, st.session_state.history, USER_KEY)
     st.rerun()  # 사이드바 대화 목록에 이번 세션(제목·순서) 즉시 반영

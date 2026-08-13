@@ -42,6 +42,8 @@ SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "sksq-agent sanghwalee@sksquare.com
 # ── 에이전트 두뇌(LLM) 선택 ────────────────────────────────────────
 # LLM 은 "어떤 tool 을 부를지"만 정한다. UI(사이드바)에서 실행 중에도 전환 가능.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+# 배포(클라우드) 여부 — claude CLI 두뇌 숨김 등 배포 전용 동작 토글. 시크릿/env 로 DEPLOY_MODE=1.
+DEPLOY_MODE = os.getenv("DEPLOY_MODE", "").strip().lower() in ("1", "true", "yes")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
