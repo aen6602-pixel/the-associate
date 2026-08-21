@@ -41,8 +41,23 @@ SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "sksq-agent sanghwalee@sksquare.com
 # ── 에이전트 두뇌(LLM) 선택 ────────────────────────────────────────
 # LLM 은 "어떤 tool 을 부를지"만 정한다. UI(사이드바)에서 실행 중에도 전환 가능.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
-# 배포(클라우드) 여부 — claude CLI 두뇌 숨김 등 배포 전용 동작 토글. 시크릿/env 로 DEPLOY_MODE=1.
-DEPLOY_MODE = os.getenv("DEPLOY_MODE", "").strip().lower() in ("1", "true", "yes")
+
+# ── 배포 모드 ──────────────────────────────────────────────────────
+# 배포 모드가 하는 일: claude CLI 두뇌 숨김 + **인증이 없으면 앱을 열지 않음**(fail-closed).
+# 그래서 이 값이 잘못 False 로 잡히면 공개 URL 이 게이트 없이 열린다 → 호스팅 흔적이 보이면
+# 명시적 설정이 없어도 배포로 간주한다. 끄고 싶으면 DEPLOY_MODE=0 을 명시하면 된다.
+_HOST_ENV_PREFIXES = ("RAILWAY_", "RENDER", "FLY_", "DYNO", "K_SERVICE", "WEBSITE_SITE_NAME")
+
+
+def detect_deploy_mode(env: dict[str, str] | None = None) -> bool:
+    env = os.environ if env is None else env
+    raw = (env.get("DEPLOY_MODE") or "").strip().lower()
+    if raw:
+        return raw in ("1", "true", "yes", "on")
+    return any(k.startswith(_HOST_ENV_PREFIXES) for k in env)
+
+
+DEPLOY_MODE = detect_deploy_mode()
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")

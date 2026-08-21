@@ -45,7 +45,7 @@ Railway 에 GitHub 저장소를 이미 붙이고 브랜치를 `main` 으로 잡�
 Railway → 서비스 → **Variables** → *Raw Editor* 에 붙여넣고 값 채우기.
 
 ```env
-DEPLOY_MODE=1
+DEPLOY_MODE=1          # 사실 Railway 에선 자동 감지되지만, 명시해 두는 편이 안전하다
 LLM_PROVIDER=openai
 DATA_DIR=/data
 
@@ -122,6 +122,10 @@ Railway 는 무료 티어가 없다(Hobby $5/월, 사용량 $5 포함). 상시 1
 
 ## 알아둘 것
 
+- **배포 모드는 자동 감지된다.** 배포 모드는 인증이 없으면 앱을 열지 않는(fail-closed) 스위치라,
+  깜빡하면 공개 URL 이 게이트 없이 열린다. 그래서 `DEPLOY_MODE` 가 없어도 호스팅 환경변수
+  (`RAILWAY_*` 등)가 보이면 배포로 간주한다([core/config.py](core/config.py) `detect_deploy_mode`).
+  일부러 끄려면 `DEPLOY_MODE=0` 을 명시해야 한다.
 - **`/healthz` 는 앱이 실제로 살아있음을 뜻한다.** 이 응답은 FastAPI 라우팅까지 도달해야 나오므로,
   모듈 import 실패·설정 오류면 헬스체크가 실패해 Railway 가 이전 배포를 유지한다.
   (참고: 이전 Streamlit 구성의 `/_stcore/health` 는 앱 스크립트를 실행하지 않고도 200 을 줘서
