@@ -4,10 +4,12 @@
 sessions/
 __pycache__/
 *.pyc
+output/
 outputs/
 *.xlsx
+*.log
 !templates/*.xlsx
-.streamlit/secrets.toml
+.pytest_cache/
 
 # Claude Code 로컬 설정 (개인 권한/락 파일)
 .claude/

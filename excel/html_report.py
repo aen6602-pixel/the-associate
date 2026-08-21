@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import re
 
+from core import markdown
 from core.schema import now_iso
 
 _TIER = {
@@ -27,62 +28,11 @@ def _fmt_args(d: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in (d or {}).items())
 
 
-def _inline_md(text: str) -> str:
-    """이미 escape 된 텍스트에 **bold**/`code` 만 최소 지원."""
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
-    return text
-
-
 def _md_to_html(md: str) -> str:
-    """LLM 답변(마크다운 유사 텍스트)을 의존성 없이 최소 변환. 표/헤더/불릿/문단만 지원."""
-    if not md:
-        return ""
-    lines = md.replace("\r\n", "\n").split("\n")
-    out: list[str] = []
-    in_ul = False
-    para: list[str] = []
+    """LLM 답변(마크다운) → HTML. 변환기는 웹 UI 와 공용(`core.markdown`)이다.
 
-    def flush_para():
-        if para:
-            out.append("<p>" + _inline_md(" ".join(para)) + "</p>")
-            para.clear()
-
-    for raw in lines:
-        line = raw.rstrip()
-        stripped = line.strip()
-        if not stripped:
-            flush_para()
-            if in_ul:
-                out.append("</ul>")
-                in_ul = False
-            continue
-        header = re.match(r"^(#{1,6})\s+(.*)$", stripped)
-        if header:
-            flush_para()
-            if in_ul:
-                out.append("</ul>")
-                in_ul = False
-            level = min(len(header.group(1)) + 2, 6)  # 리포트 내부에선 h1/h2를 리포트 제목용으로 예약
-            out.append(f"<h{level}>{_inline_md(html.escape(header.group(2)))}</h{level}>")
-            continue
-        bullet = re.match(r"^[-*]\s+(.*)$", stripped)
-        if bullet:
-            flush_para()
-            if not in_ul:
-                out.append("<ul>")
-                in_ul = True
-            out.append("<li>" + _inline_md(html.escape(bullet.group(1))) + "</li>")
-            continue
-        if in_ul:
-            out.append("</ul>")
-            in_ul = False
-        para.append(html.escape(stripped))
-
-    flush_para()
-    if in_ul:
-        out.append("</ul>")
-    return "\n".join(out)
+    heading_offset=2 — 리포트는 h1/h2 를 문서 제목·섹션 제목용으로 예약해 두었다."""
+    return markdown.render(md, heading_offset=2)
 
 
 def _render_trace_item(t: dict) -> str:
@@ -142,6 +92,15 @@ h1{font-size:1.5rem;margin-bottom:4px}
 .answer p{margin:.6em 0}
 .answer h3,.answer h4{margin:1em 0 .3em}
 .answer code{background:#f1f1f1;padding:1px 5px;border-radius:3px;font-size:.9em}
+.answer pre{background:#f7f7f8;border:1px solid #e5e5e5;border-radius:6px;padding:10px;overflow-x:auto}
+.answer pre code{background:none;padding:0}
+.answer blockquote{margin:.7em 0;padding:2px 12px;border-left:3px solid #ddd;color:#555}
+.answer hr{border:none;border-top:1px solid #e0e0e0;margin:1.2em 0}
+.md-table-wrap{overflow-x:auto;margin:.9em 0}
+.answer table{border-collapse:collapse;font-size:.88rem;min-width:100%}
+.answer th,.answer td{border:1px solid #e0e0e0;padding:5px 9px;text-align:left;white-space:nowrap}
+.answer th{background:#f5f6f8;font-weight:600}
+.answer tbody tr:nth-child(even){background:#fafafa}
 h2.section{font-size:1.05rem;border-top:1px solid #e0e0e0;padding-top:18px;margin-top:28px;color:#333}
 .src-item{border:1px solid #e5e5e5;border-radius:6px;padding:10px 14px;margin-bottom:10px;font-size:.88rem}
 .src-item.src-error{border-color:#f3c6c4;background:#fff8f7}
@@ -160,6 +119,12 @@ footer{margin-top:36px;color:#999;font-size:.78rem;border-top:1px solid #eee;pad
   .src-item{border-color:#3a3a3a}
   .src-item.src-error{border-color:#5c3230;background:#2a1f1e}
   .answer code,.src-head code{background:#333;color:#eee}
+  .answer pre{background:#252525;border-color:#3a3a3a}
+  .answer blockquote{border-left-color:#444;color:#bbb}
+  .answer hr{border-top-color:#3a3a3a}
+  .answer th,.answer td{border-color:#3a3a3a}
+  .answer th{background:#2a2d33}
+  .answer tbody tr:nth-child(even){background:#242424}
   .src-extra{color:#ccc}
   h2.section{border-top-color:#3a3a3a;color:#ccc}
   footer{border-top-color:#3a3a3a}

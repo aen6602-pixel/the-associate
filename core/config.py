@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -15,9 +14,9 @@ try:
 except Exception:
     pass
 
-ROOT = Path(__file__).resolve().parent.parent
-CACHE_DIR = ROOT / ".cache"
-CACHE_DIR.mkdir(exist_ok=True)
+# 경로는 core.paths 가 결정한다 (배포 시 DATA_DIR 볼륨, 로컬은 리포지토리 폴더).
+# 기존 import 를 깨지 않도록 ROOT/CACHE_DIR 이름은 그대로 재노출한다.
+from .paths import CACHE_DIR, DATA_DIR, IS_PERSISTENT, ROOT  # noqa: F401
 
 load_dotenv(ROOT / ".env")
 

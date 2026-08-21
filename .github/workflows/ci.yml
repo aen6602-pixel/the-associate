@@ -1,0 +1,100 @@
+# The Associate — CI
+#
+# Railway 는 main 브랜치에 push 가 들어오면 자동 배포한다(GitHub 연동). 이 워크플로가 그 앞의
+# 안전장치다 — Railway Settings 에서 "Wait for CI" 를 켜면 아래가 초록불일 때만 배포가 나간다.
+#
+#   test : 전체 소스 컴파일 + 로그인 게이트/세션 격리/스트리밍/마크다운 회귀 테스트
+#   boot : Railway 와 **같은 시작 명령**으로 실제 uvicorn 을 띄워
+#          헬스체크·정적 UI·미인증 차단을 HTTP 로 확인 (컨테이너/도커 없이)
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: compile every source file
+        run: python -m compileall -q conftest.py core agent engines providers excel server tests
+
+      - name: pytest
+        run: pytest -q
+
+  boot:
+    name: server boots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: start the app exactly like Railway does
+        env:
+          PORT: 8080
+          DEPLOY_MODE: "1"
+          APP_USERS: ci:ci-smoke-password
+          SESSION_SECRET: ci-only-secret
+          OPENAI_API_KEY: sk-ci-placeholder
+        run: |
+          uvicorn server.main:app --host 0.0.0.0 --port $PORT \
+            --proxy-headers --forwarded-allow-ips '*' > uvicorn.log 2>&1 &
+          echo $! > uvicorn.pid
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:$PORT/healthz" > /dev/null; then
+              echo "healthy after ${i} tries"; break
+            fi
+            if [ "$i" = "30" ]; then echo "::error::server never became healthy"; cat uvicorn.log; exit 1; fi
+            sleep 2
+          done
+
+      - name: health check reports the deploy config
+        run: |
+          curl -fsS http://localhost:8080/healthz | tee /dev/stderr | grep -q '"auth":true'
+
+      - name: UI is served
+        run: |
+          curl -fsS http://localhost:8080/ | grep -q "The Associate"
+          curl -fsS -o /dev/null http://localhost:8080/static/app.js
+          curl -fsS -o /dev/null http://localhost:8080/static/styles.css
+
+      - name: unauthenticated requests are refused
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/bootstrap)
+          echo "GET /api/bootstrap -> $code"
+          [ "$code" = "401" ] || { echo "::error::login gate is not enforced"; exit 1; }
+
+      - name: login works end to end
+        run: |
+          curl -fsS -c jar.txt -X POST http://localhost:8080/api/login \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"ci","password":"ci-smoke-password"}' > /dev/null
+          curl -fsS -b jar.txt http://localhost:8080/api/bootstrap | grep -q '"label":"ci"'
+
+      - name: server log (always)
+        if: always()
+        run: cat uvicorn.log || true

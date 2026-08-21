@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>The Associate</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230A0E17'/><text y='23' x='6' font-size='20' fill='%23F0B429' font-family='sans-serif' font-weight='600'>A</text></svg>">
+</head>
+<body>
+
+<!-- 첫 로드 스플래시 (CSS 로 자동 페이드아웃) -->
+<div class="splash" id="splash">
+  <div class="splash-inner">
+    <div class="wordmark">THE ASSOCIATE</div>
+    <div class="rule"></div>
+    <div class="tagline">Every figure, traced to its source.</div>
+    <div class="loading">
+      <span class="ln">Opening the desk<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>
+      <span class="ln">Connecting to sources<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>
+      <span class="ln">Spreading the comps<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>
+    </div>
+  </div>
+</div>
+
+<!-- 로그인 -->
+<div class="gate" id="gate" hidden>
+  <div class="gate-box">
+    <div class="wordmark sm">THE ASSOCIATE</div>
+    <div class="rule"></div>
+    <div class="tagline">Every figure, traced to its source.</div>
+    <form id="login-form" class="gate-form" autocomplete="on">
+      <label id="name-row"><span>Name</span>
+        <input type="text" id="login-name" autocomplete="username" spellcheck="false">
+      </label>
+      <label><span>Password</span>
+        <input type="password" id="login-password" autocomplete="current-password" required>
+      </label>
+      <button type="submit" class="primary" id="login-submit">Sign in</button>
+      <p class="gate-msg" id="gate-msg" hidden></p>
+      <p class="gate-hint">접근 권한을 받은 사용자만 이용할 수 있습니다.</p>
+    </form>
+  </div>
+</div>
+
+<!-- 본 앱 -->
+<div class="shell" id="shell" hidden>
+  <aside class="sidebar" id="sidebar">
+    <div class="viewer-row" id="viewer-row" hidden>
+      <span class="viewer" id="viewer-label"></span>
+      <button class="ghost sm" id="logout-btn" title="로그아웃">Out</button>
+    </div>
+
+    <div class="sec">Conversations</div>
+    <button class="ghost wide" id="new-session">＋&nbsp; New session</button>
+    <p class="warn" id="ephemeral-warn" hidden>⚠︎ Ephemeral storage — conversations reset on redeploy.</p>
+    <div class="session-list" id="session-list"></div>
+
+    <div class="divider"></div>
+
+    <div class="sec">Data Sources</div>
+    <p class="hint">Click any item for details. 🟢 official 🔵 reference · ✅ live ⬜ key needed 🔜 planned</p>
+
+    <details class="engine" id="engine-box">
+      <summary id="engine-summary">🧠 Engine</summary>
+      <div class="engine-body">
+        <p class="hint">질문을 이해하고 <strong>어떤 도구(API)를 부를지</strong> 결정합니다. 숫자는 만들지 않습니다.</p>
+        <label><span>제공사</span>
+          <select id="provider-select"></select>
+        </label>
+        <label><span>모델</span>
+          <select id="model-select"></select>
+        </label>
+        <input type="text" id="model-custom" placeholder="예: gpt-5, gemini-2.5-pro" hidden>
+        <p class="engine-key" id="engine-key"></p>
+      </div>
+    </details>
+
+    <div id="source-groups"></div>
+  </aside>
+
+  <main class="main">
+    <button class="ghost sm sidebar-toggle" id="sidebar-toggle" title="사이드바">☰</button>
+    <div class="content">
+      <h1>The Associate</h1>
+      <p class="lede">Your AI valuation associate — the work an investment bank or accounting
+        firm would run, on demand.</p>
+      <p class="lede">Every figure traces back to a public source. No fabricated numbers.
+        No hallucinations.</p>
+
+      <p class="warn box" id="engine-warn" hidden></p>
+
+      <ul class="caps" id="caps">
+        <li>Pull primary disclosures straight from the filing — Korea, the U.S., Japan and
+          Taiwan — and read the financials line by line, footnotes included.</li>
+        <li>Mark the inputs that actually move a valuation — risk-free curves, equity risk
+          premia, corporate tax and country risk, Beta — off the Bank of Korea, FRED and Damodaran.</li>
+        <li>Put it to work in whatever the situation calls for — DCF, trading comps, and
+          Korean statutory appraisal — with every number tied back to where it came from.</li>
+      </ul>
+
+      <div class="chat" id="chat"></div>
+    </div>
+
+    <form class="composer" id="composer">
+      <textarea id="question" rows="1" placeholder="Instruct the associate…  (밸류에이션·데이터 질문)"
+                autocomplete="off"></textarea>
+      <button type="submit" class="primary" id="send-btn" title="보내기 (Enter)">↑</button>
+    </form>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

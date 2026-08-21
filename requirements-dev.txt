@@ -1,0 +1,4 @@
+# CI/로컬 테스트용 (배포 런타임에는 안 들어간다)
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1          # fastapi.testclient 가 요구

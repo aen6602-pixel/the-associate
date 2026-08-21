@@ -11,9 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SESSIONS_DIR = ROOT / "sessions"
-SESSIONS_DIR.mkdir(exist_ok=True)
+from .paths import ROOT, SESSIONS_DIR  # noqa: F401 — ROOT 는 기존 import 호환용
 
 
 def _now_iso() -> str:
