@@ -92,6 +92,7 @@ button:disabled { opacity: .5; cursor: default; }
 .gate { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 2rem; }
 .gate-box { text-align: center; width: 100%; max-width: 380px; }
 .gate-form { margin-top: 2.4rem; text-align: left; display: flex; flex-direction: column; gap: .9rem; }
+.gate-fields { display: flex; flex-direction: column; gap: .9rem; }
 .gate-form label { display: flex; flex-direction: column; gap: .3rem; }
 .gate-form label span { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
                         color: var(--text-mute); }

@@ -30,17 +30,20 @@
     <div class="wordmark sm">THE ASSOCIATE</div>
     <div class="rule"></div>
     <div class="tagline">Every figure, traced to its source.</div>
-    <form id="login-form" class="gate-form" autocomplete="on">
-      <label id="name-row"><span>Name</span>
-        <input type="text" id="login-name" autocomplete="username" spellcheck="false">
-      </label>
-      <label><span>Password</span>
-        <input type="password" id="login-password" autocomplete="current-password" required>
-      </label>
-      <button type="submit" class="primary" id="login-submit">Sign in</button>
+    <div class="gate-form">
+      <!-- 서버가 "설정이 없어 못 연다"고 하면 폼은 감추고 안내만 남긴다(눌러도 소용없으므로) -->
+      <form id="login-form" class="gate-fields" autocomplete="on">
+        <label id="name-row"><span>Name</span>
+          <input type="text" id="login-name" autocomplete="username" spellcheck="false">
+        </label>
+        <label><span>Password</span>
+          <input type="password" id="login-password" autocomplete="current-password" required>
+        </label>
+        <button type="submit" class="primary" id="login-submit">Sign in</button>
+      </form>
       <p class="gate-msg" id="gate-msg" hidden></p>
-      <p class="gate-hint">접근 권한을 받은 사용자만 이용할 수 있습니다.</p>
-    </form>
+      <p class="gate-hint" id="gate-hint">접근 권한을 받은 사용자만 이용할 수 있습니다.</p>
+    </div>
   </div>
 </div>
 

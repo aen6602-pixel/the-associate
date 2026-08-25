@@ -56,19 +56,24 @@ async function boot() {
     showGate(`서버에 연결할 수 없습니다: ${e.message}`, false);
     return;
   }
-  if (me.blocked) { showGate(me.message, false); return; }
+  if (me.blocked) { showGate(me.message, false, true); return; }
   if (!me.authenticated) { showGate(null, me.needs_name); return; }
   await enterApp();
 }
 
-function showGate(message, needsName) {
+/* fatal=true 는 "설정이 없어서 아무도 못 들어오는 상태" — 로그인해봐야 소용없으니 폼을 감춘다. */
+function showGate(message, needsName, fatal = false) {
   $('shell').hidden = true;
   $('gate').hidden = false;
   $('name-row').hidden = !needsName;
+  $('login-form').hidden = fatal;
+  $('gate-hint').hidden = fatal;
   const box = $('gate-msg');
   box.hidden = !message;
   if (message) box.textContent = message;
-  if (!message) setTimeout(() => $(needsName ? 'login-name' : 'login-password').focus(), 60);
+  if (!message && !fatal) {
+    setTimeout(() => $(needsName ? 'login-name' : 'login-password').focus(), 60);
+  }
 }
 
 $('login-form').addEventListener('submit', async (e) => {
