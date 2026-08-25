@@ -18,7 +18,8 @@ beautifulsoup4==4.15.0
 
 # 데이터 처리 & 엑셀
 pandas==2.3.3
-openpyxl==3.1.5
+openpyxl==3.1.5        # .xlsx (Damodaran ctryprem)
+xlrd==2.0.2            # .xls (Damodaran 산업별 베타/WACC 데이터셋은 레거시 xls)
 
 # 시장 데이터 (키 불필요) — 무거워서 별도 설치. 현재 코드 경로에선 미사용(네이버 우회 사용)
 # pykrx        # 한국 주가/시총

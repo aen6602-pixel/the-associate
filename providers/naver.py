@@ -79,3 +79,52 @@ def snapshot(stock_code: str, name: str | None = None) -> dict:
 
 def market_cap(stock_code: str, name: str | None = None) -> Value:
     return snapshot(stock_code, name)["market_cap"]
+
+
+# ── 주가/지수 시계열 (베타 회귀용) ─────────────────────────────────
+# 실측 확인(2026-08): 개별종목·지수 모두 일/주/월봉이 2019년부터 조회된다.
+_PERIODS = ("day", "week", "month")
+
+
+def _chart(path: str, period: str, years: int) -> list[dict]:
+    if period not in _PERIODS:
+        raise DataError(f"period 는 {_PERIODS} 중 하나여야 합니다: {period!r}")
+    from datetime import date
+
+    today = date.today()
+    start = today.replace(year=today.year - int(years))
+    url = (f"https://api.stock.naver.com/chart/domestic/{path}/{period}"
+           f"?startDateTime={start:%Y%m%d}0000&endDateTime={today:%Y%m%d}0000")
+    r = session().get(url, headers=_UA, timeout=30)
+    r.raise_for_status()
+    rows = r.json()
+    if not isinstance(rows, list) or not rows:
+        raise DataError(f"시계열을 못 받았습니다: {url}")
+    out = []
+    for row in rows:
+        close = row.get("closePrice")
+        d = row.get("localDate")
+        if close is None or not d:
+            continue
+        try:
+            out.append({"date": str(d), "close": float(close)})
+        except (TypeError, ValueError):
+            continue
+    if len(out) < 2:
+        raise DataError(f"시계열 관측치가 부족합니다({len(out)}개): {url}")
+    return out
+
+
+def price_series(stock_code: str, period: str = "week", years: int = 5) -> list[dict]:
+    """개별종목 종가 시계열 [{'date','close'}, ...] (과거→최신)."""
+    if not (stock_code and stock_code.isdigit() and len(stock_code) == 6):
+        raise DataError(f"유효한 6자리 종목코드가 필요합니다: {stock_code!r}")
+    return _chart(f"item/{stock_code}", period, years)
+
+
+def index_series(index: str = "KOSPI", period: str = "week", years: int = 5) -> list[dict]:
+    """시장지수 종가 시계열. index: KOSPI | KOSDAQ."""
+    idx = (index or "KOSPI").strip().upper()
+    if idx not in ("KOSPI", "KOSDAQ"):
+        raise DataError(f"지원하지 않는 지수: {index} (KOSPI, KOSDAQ)")
+    return _chart(f"index/{idx}", period, years)

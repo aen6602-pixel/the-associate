@@ -86,6 +86,29 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     equity = ev - float(net_debt)
     per_share = equity / shares
 
+    # ── 검증: 기계적으로는 값이 나오지만 밸류에이션으로 의미가 없는 조합을 경고한다 ──
+    # (실측 사례: SK하이닉스에 5개년 평균 CAPEX/매출 31% + EBIT마진 14% 를 넣으면 전 연도
+    #  UFCF 가 음수 → EV −66조. 숫자를 그냥 내보내면 '가치가 음수' 로 오독된다.)
+    warnings: list[str] = []
+    neg_years = [r["t"] for r in rows if r["ufcf"] < 0]
+    if len(neg_years) == n:
+        warnings.append(
+            f"예측 {n}개년 전부 UFCF 가 음수 — 재투자(CAPEX {capex_pct}%)가 세후영업이익+D&A 를 "
+            f"초과하는 입력입니다. 경기민감 업종에 과거 평균을 그대로 쓰면 흔히 발생하며, "
+            f"이 상태의 EV/주당가치는 밸류에이션으로 해석할 수 없습니다.")
+    elif neg_years:
+        warnings.append(f"UFCF 가 음수인 예측연도: {neg_years} — 재투자 가정 확인 필요.")
+    if ufcf_n <= 0:
+        warnings.append(
+            f"최종연도 UFCF 가 {ufcf_n:,.0f} (≤0) 이라 Gordon Growth 로 만든 TV 가 무의미합니다.")
+    if ev <= 0:
+        warnings.append(f"EV 가 음수({ev:,.0f})입니다 — 입력 가정을 재검토해야 합니다.")
+    if equity <= 0:
+        warnings.append(f"지분가치가 음수({equity:,.0f})입니다 — 주당가치는 의미가 없습니다(NM).")
+    if ev > 0 and pv_tv / ev > 0.9:
+        warnings.append(f"EV 의 {pv_tv / ev * 100:.0f}% 가 Terminal Value 입니다 "
+                        f"(90% 초과) — 예측기간 가정보다 g·WACC 에 결과가 지배됩니다.")
+
     name = rev0.label or company
     for suffix in (" 매출액", " Revenue"):
         if suffix in name:
@@ -102,6 +125,7 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
         "terminal_growth_pct": float(terminal_growth_pct), "forecast_years": n,
         "rows": rows, "tv": tv, "pv_tv": pv_tv, "pv_ufcf_sum": pv_sum,
         "ev": ev, "equity_value": equity, "per_share": per_share,
+        "warnings": warnings, "valuation_reliable": not warnings,
     }
 
 
@@ -126,6 +150,8 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         f"= EV {f(d['ev'])}. 순부채 {f(d['net_debt'])} 차감 → 지분가치 {f(d['equity_value'])} "
         f"→ 주당 {f(d['per_share'])}{cur}."
     )
+    if d["warnings"]:
+        note += " ⚠️ [검증 경고] " + " | ".join(d["warnings"])
     def _computed(label: str, val: float, src_url: str, extra_note: str) -> Value:
         return Value(
             value=round(val), unit=cur, label=f"{d['company']} {label}",

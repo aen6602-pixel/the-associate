@@ -127,6 +127,127 @@ def _make(country: str, needles: tuple[str, ...], label: str, unit: str = "%") -
     )
 
 
+# ── 산업별 베타·자본구조 (betas.xls 계열) ──────────────────────────
+# 'Industry Averages' 시트 컬럼(실측 2026-08, 2026-01-05 갱신):
+#   Industry Name | Number of firms | Beta | D/E Ratio | Effective Tax rate |
+#   Unlevered beta | Cash/Firm value | Unlevered beta corrected for cash | ...
+# 비상장사·신설법인의 베타와 '목표 부채비중' 을 여기서 얻는다.
+_INDUSTRY_FILES = {
+    "emerging": "betaemerg.xls",   # 한국 등 신흥시장
+    "global": "betaGlobal.xls",
+    "us": "betas.xls",
+}
+_REGION_BY_COUNTRY = {"KR": "emerging", "TW": "emerging", "US": "us", "JP": "global"}
+
+
+def _industry_frame(region: str) -> tuple[pd.DataFrame, str, str]:
+    fname = _INDUSTRY_FILES.get(region)
+    if fname is None:
+        raise DataError(f"지원하지 않는 지역: {region} (지원: {', '.join(_INDUSTRY_FILES)})")
+    url = f"https://pages.stern.nyu.edu/~adamodar/pc/datasets/{fname}"
+    raw = get_bytes(url, ttl_hours=24 * 30)
+    xls = pd.ExcelFile(io.BytesIO(raw))
+    sheet = next((s for s in xls.sheet_names if "industry" in s.lower()), xls.sheet_names[0])
+    probe = xls.parse(sheet, header=None, nrows=20)
+    hdr = None
+    for i in range(len(probe)):
+        cells = [str(c) for c in probe.iloc[i].tolist()]
+        if any("Industry" in c and "Name" in c for c in cells):
+            hdr = i
+            break
+    if hdr is None:
+        raise DataError(f"{fname} 에서 산업 테이블 헤더를 찾지 못했습니다.")
+    df = xls.parse(sheet, header=hdr).dropna(how="all")
+    df.columns = [str(c).strip() for c in df.columns]
+    as_of = None
+    for i in range(min(4, len(probe))):
+        for c in probe.iloc[i].tolist():
+            if hasattr(c, "strftime"):
+                as_of = c.strftime("%Y-%m-%d")
+                break
+        if as_of:
+            break
+    return df, url, as_of or "n/a"
+
+
+def industry_list(region: str = "emerging") -> list[str]:
+    df, _, _ = _industry_frame(region)
+    return [str(x).strip() for x in df["Industry Name"].dropna().tolist()]
+
+
+def industry_metrics(industry: str, region: str = "emerging") -> dict:
+    """{unlevered_beta, levered_beta, de_ratio, debt_to_value, effective_tax_rate} (Value).
+
+    industry 는 Damodaran 산업명(예: 'Semiconductor', 'Food Processing') — 부분일치로 찾는다.
+    `debt_to_value` = (D/E)/(1+D/E) 로 환산한 목표 부채비중이라 WACC 에 바로 넣을 수 있다."""
+    df, url, as_of = _industry_frame(region)
+    names = df["Industry Name"].astype(str)
+    q = _norm(industry)
+    exact = df[names.map(_norm) == q]
+    hit = exact if len(exact) else df[names.map(lambda s: q in _norm(s))]
+    if not len(hit):
+        import difflib
+
+        close = difflib.get_close_matches(industry, names.tolist(), n=5, cutoff=0.4)
+        raise DataError(
+            f"Damodaran 산업 '{industry}' 를 {region} 데이터셋에서 찾지 못했습니다. "
+            + (f"비슷한 이름: {', '.join(close)}" if close else
+               "get_industry_benchmarks 없이 베타를 직접 지정하세요."))
+    row = hit.iloc[0]
+    name = str(row["Industry Name"]).strip()
+
+    def _prov(field: str, note: str) -> Provenance:
+        return Provenance(source=f"Damodaran ({_INDUSTRY_FILES[region]})",
+                          source_type=SourceType.REFERENCE, source_url=url,
+                          original_field=field, as_of=as_of, note=note)
+
+    def _num(col: str) -> float | None:
+        try:
+            v = float(row[col])
+        except (TypeError, ValueError, KeyError):
+            return None
+        return None if v != v else v  # NaN 제거
+
+    de = _num("D/E Ratio")
+    unlev = _num("Unlevered beta")
+    lev = _num("Beta")
+    tax = _num("Effective Tax rate")
+    n_firms = _num("Number of firms")
+
+    out: dict[str, Value] = {}
+    if unlev is not None:
+        out["unlevered_beta"] = Value(
+            round(unlev, 4), "배", label=f"{name} 산업 무차입베타 ({region})",
+            provenance=_prov("Unlevered beta",
+                             f"표본 {int(n_firms) if n_firms else '?'}개사. 자기 자본구조로 "
+                             f"재레버리지(relever)해서 쓴다."))
+    if lev is not None:
+        out["levered_beta"] = Value(
+            round(lev, 4), "배", label=f"{name} 산업 레버드베타 ({region})",
+            provenance=_prov("Beta", f"산업 평균 자본구조(D/E {de:.3f}) 기준"
+                                     if de is not None else "산업 평균"))
+    if de is not None:
+        out["de_ratio"] = Value(
+            round(de, 4), "배", label=f"{name} 산업 D/E ({region})",
+            provenance=_prov("D/E Ratio", "시장가치 기준 산업 평균 부채/자본"))
+        out["debt_to_value"] = Value(
+            round(de / (1 + de), 4), "비율", label=f"{name} 산업 목표부채비중 D/(D+E) ({region})",
+            provenance=_prov("D/E Ratio", f"D/E {de:.4f} → D/(D+E) = D/E÷(1+D/E) 로 환산. "
+                                          f"WACC 의 목표 자본구조로 사용."))
+    if tax is not None:
+        out["effective_tax_rate"] = Value(
+            round(tax * 100, 2), "%", label=f"{name} 산업 실효세율 ({region})",
+            provenance=_prov("Effective Tax rate", "무차입베타 재레버리지에 쓰는 세율"))
+    out["industry_name"] = Value(
+        0, "", label=name,
+        provenance=_prov("Industry Name", f"매칭된 Damodaran 산업명: {name}"))
+    return out
+
+
+def region_for(country: str) -> str:
+    return _REGION_BY_COUNTRY.get((country or "KR").strip().upper(), "global")
+
+
 def equity_risk_premium(country: str = "KR") -> Value:
     """국가 총 주식위험프리미엄 (= market risk premium). 단위 %."""
     return _make(country, ("equity", "risk", "premium"), "Equity Risk Premium")

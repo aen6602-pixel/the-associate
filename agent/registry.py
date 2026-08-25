@@ -11,12 +11,16 @@ from typing import Callable
 from core.schema import Value, Provenance, SourceType, DataError
 from providers import damodaran, fx, ecos, fred, dart, sec, edinet, finmind, openfigi, mops
 from engines import (wacc as wacc_engine, sangjeung as sangjeung_engine,
-                     dcf as dcf_engine, comps as comps_engine)
+                     dcf as dcf_engine, comps as comps_engine,
+                     dcf_inputs as dcf_inputs_engine, beta as beta_engine)
 
 _ITEM_ENUM = ["revenue", "operating_income", "net_income",
-             "total_assets", "total_liabilities", "total_equity"]
+             "total_assets", "total_liabilities", "total_equity",
+             "cash", "ppe", "inventories", "trade_receivables", "trade_payables"]
 _ITEM_DESC = ("항목: revenue(매출액), operating_income(영업이익), net_income(당기순이익), "
-             "total_assets(자산총계), total_liabilities(부채총계), total_equity(자본총계).")
+             "total_assets(자산총계), total_liabilities(부채총계), total_equity(자본총계), "
+             "cash(현금및현금성자산), ppe(유형자산), inventories(재고자산), "
+             "trade_receivables(매출채권), trade_payables(매입채무).")
 
 # ── tool 이름 → (실행 함수, Claude 스키마) ──────────────────────────────────
 
@@ -154,6 +158,100 @@ def _dcf(company: str, wacc_pct: float, net_debt: float, revenue_growth_pct: flo
 
 def _comps(target: str, peers: list, year: int | None = None) -> Value:
     return comps_engine.evaluate(target, peers, year)
+
+
+# ── 선택 인자 정규화 ──────────────────────────────────────────────
+# LLM 은 선택 인자를 **생략하지 않고 0/빈문자열로 채워 보내는 일이 흔하다**(실측: gpt-5.6-terra
+# 가 beta_override=0, year=0, industry="" 를 넘김). 그대로 두면 β=0 인 WACC(=Rf)가 조용히
+# 계산되거나 DART 조회가 실패한다 → "값 없음" 으로 해석해 자동 도출 경로를 타게 한다.
+def _blank(x):
+    """None/빈문자열/공백 → None."""
+    return None if x is None or (isinstance(x, str) and not x.strip()) else x
+
+
+def _pos(x):
+    """None/0/음수/빈값 → None. 0 이나 음수가 의미 없는 인자(연도·베타·비율)에만 쓴다."""
+    x = _blank(x)
+    if x is None:
+        return None
+    try:
+        return x if float(x) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+# ── DCF 입력 자동 도출 ────────────────────────────────────────────
+def _net_debt(company: str, year: int | None = None, include_lease: bool = True) -> Value:
+    return dcf_inputs_engine.net_debt(company, _pos(year), include_lease)
+
+
+def _dcf_assumptions(company: str, n: int = 5, year: int | None = None) -> Value:
+    """5개년 실적에서 DCF 가정 후보를 한 번에 뽑아 하나의 Value 로 묶어 돌려준다."""
+    r = dcf_inputs_engine.historical_ratios(company, int(_pos(n) or 5), _pos(year))
+    found = {k: v for k, v in r.items()
+             if k.endswith("_pct") and isinstance(v, Value)}
+    if not found:
+        raise DataError(f"{company} 의 5개년 비율을 하나도 계산하지 못했습니다.")
+    lines = [f"{v.label}: {v.value}%" for v in found.values()]
+    note = (f"{r['company']} {r['years'][-1]}~{r['years'][0]} 실적 기반. " + " / ".join(lines)
+            + (f". 자동 도출 실패: {', '.join(r['missing'])} → 이 항목만 가정으로 지정 필요"
+               if r["missing"] else ". 전 항목 자동 도출 성공"))
+    return Value(
+        value=len(found), unit="개 항목",
+        label=f"{r['company']} DCF 가정 자동 도출({r['years'][-1]}~{r['years'][0]})",
+        provenance=Provenance(source="계산엔진(engines.dcf_inputs)",
+                              source_type=SourceType.COMPUTED,
+                              source_url="(computed from DART 5개년 공시)",
+                              as_of=r["as_of"], note=note),
+        extras=found,
+    )
+
+
+def _cost_of_debt(company: str, year: int | None = None, include_lease: bool = True) -> Value:
+    return dcf_inputs_engine.cost_of_debt(company, _pos(year), include_lease)
+
+
+def _terminal_growth(country: str = "KR", tenor: str = "10Y") -> Value:
+    return dcf_inputs_engine.terminal_growth(country, _blank(tenor) or "10Y")
+
+
+def _beta(company: str, industry: str | None = None, country: str = "KR",
+          period: str = "week", years: int = 5) -> Value:
+    return beta_engine.beta_for(company, _blank(industry), country,
+                               _blank(period) or "week", int(_pos(years) or 5))
+
+
+def _industry_benchmarks(industry: str, country: str = "KR") -> Value:
+    """Damodaran 산업 평균(무차입베타·D/E·목표부채비중·실효세율)을 한 Value 로 묶어 돌려준다."""
+    industry = _blank(industry)
+    if not industry:
+        raise DataError("industry (Damodaran 산업명)를 지정하세요. 예: Semiconductor")
+    region = damodaran.region_for(country)
+    m = damodaran.industry_metrics(industry, region)
+    name = m["industry_name"].label
+    parts = {k: v for k, v in m.items() if k != "industry_name"}
+    note = (f"Damodaran '{name}' 산업 평균({region}). "
+            + " / ".join(f"{v.label.split(' 산업 ')[-1] if ' 산업 ' in v.label else v.label}: "
+                        f"{v.value}{v.unit}" for v in parts.values()))
+    return Value(
+        value=len(parts), unit="개 지표", label=f"{name} 산업 벤치마크 ({region})",
+        provenance=Provenance(source=f"Damodaran ({region} 산업평균)",
+                              source_type=SourceType.REFERENCE,
+                              source_url=next(iter(parts.values())).provenance.source_url,
+                              as_of=next(iter(parts.values())).provenance.as_of, note=note),
+        extras=parts,
+    )
+
+
+def _wacc_auto(company: str, country: str = "KR", industry: str | None = None,
+               beta_override: float | None = None, cost_of_debt_pct: float | None = None,
+               debt_to_value: float | None = None,
+               debt_ratio_source: str = "auto") -> Value:
+    # 0 은 "지정 안 함" 으로 본다 — β=0·Kd=0·D/(D+E)=0 은 의미 없는 입력이고, 그대로 통과시키면
+    # Rf 와 같은 WACC 가 조용히 나온다(실측: LLM 이 beta_override=0 을 넘겨 WACC 4.32% 산출).
+    return wacc_engine.compute_wacc_auto(
+        company, country, _blank(industry), "10Y", _pos(beta_override),
+        _pos(cost_of_debt_pct), _pos(debt_to_value), _blank(debt_ratio_source) or "auto")
 
 
 _COUNTRY_PROP = {
@@ -646,6 +744,188 @@ REGISTRY: dict[str, dict] = {
                     "tenor": {"type": "string", "description": "무위험수익률 만기. 기본 10Y."},
                 },
                 "required": ["country", "beta", "cost_of_debt_pct", "debt_to_value"],
+                "additionalProperties": False,
+            },
+        },
+    },
+
+    # ── DCF 입력 자동 도출 (compute_dcf 를 부르기 전에 이걸 먼저 쓴다) ──────────
+    "get_net_debt": {
+        "fn": _net_debt,
+        "schema": {
+            "name": "get_net_debt",
+            "description": (
+                "순부채를 DART 공시에서 자동 계산한다. 순부채 = 이자발생부채(단기차입금 + "
+                "장기차입금·사채 + 리스부채) − 현금및현금성자산. compute_dcf 의 net_debt 인자에 "
+                "그대로 넣으면 된다. 음수면 순현금(net cash) 상태. "
+                "**순부채를 사용자에게 묻지 말고 이 도구를 먼저 쓸 것.**"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 (한국 기업)."},
+                    "year": {"type": "integer", "description": "사업연도. 생략하면 최신."},
+                    "include_lease": {
+                        "type": "boolean",
+                        "description": "리스부채(IFRS 16) 포함 여부. 기본 true — D&A 에 "
+                                       "사용권자산상각비가 포함되므로 일관되게 포함하는 것이 맞다.",
+                    },
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_dcf_assumptions": {
+        "fn": _dcf_assumptions,
+        "schema": {
+            "name": "get_dcf_assumptions",
+            "description": (
+                "최근 5개년 실적에서 DCF 가정의 출발점을 한 번에 도출한다: 매출성장률(YoY 평균 "
+                "및 CAGR), 영업이익률(EBIT margin), D&A/매출, CAPEX/매출, ΔNWC/Δ매출. "
+                "각 항목은 extras 에 연도별 내역과 함께 담겨 검증 가능하다. "
+                "compute_dcf 의 revenue_growth_pct·ebit_margin_pct·da_pct·capex_pct·nwc_pct 에 "
+                "대응한다. **이 값들을 사용자에게 묻기 전에 반드시 이 도구를 먼저 쓸 것.** "
+                "일부 회사는 특정 항목이 공시에서 안 나올 수 있고, 그 경우 note 에 명시된다."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 (한국 기업)."},
+                    "n": {"type": "integer", "description": "평균 낼 연수. 기본 5."},
+                    "year": {"type": "integer", "description": "기준 사업연도. 생략하면 최신."},
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_cost_of_debt": {
+        "fn": _cost_of_debt,
+        "schema": {
+            "name": "get_cost_of_debt",
+            "description": (
+                "세전 타인자본비용(Kd)을 공시에서 계산한다: 현금흐름표의 이자비용 ÷ 이자발생부채. "
+                "손익계산서의 '금융비용'은 환차손·파생손실을 포함해 Kd 로 쓸 수 없어(삼성전자 "
+                "실측 48.8%) 이자 전용 계정을 쓴다. WACC 의 cost_of_debt_pct 에 넣는 값. "
+                "무차입 회사는 계산 불가 → 산업평균(get_industry_benchmarks)을 쓸 것."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 (한국 기업)."},
+                    "year": {"type": "integer", "description": "사업연도. 생략하면 최신."},
+                    "include_lease": {"type": "boolean",
+                                      "description": "리스부채를 IBD 에 포함. 기본 true."},
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_terminal_growth": {
+        "fn": _terminal_growth,
+        "schema": {
+            "name": "get_terminal_growth",
+            "description": (
+                "영구성장률(terminal growth, g)을 제시한다. Damodaran 원칙에 따라 g 는 무위험 "
+                "수익률을 넘을 수 없으므로(영구히 경제보다 빠른 성장은 불가) 해당 국가 10년 "
+                "국채수익률을 g 의 상한으로 돌려준다. compute_dcf 의 terminal_growth_pct 에 "
+                "쓴다. 더 보수적으로 보려면 이보다 낮은 값을 쓸 것."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "country": {"type": "string", "description": "국가 코드 (KR 또는 US)."},
+                    "tenor": {"type": "string", "description": "국채 만기. 기본 10Y."},
+                },
+                "required": ["country"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_beta": {
+        "fn": _beta,
+        "schema": {
+            "name": "get_beta",
+            "description": (
+                "레버드 베타를 계산한다. 상장사는 네이버 금융(KRX 시세)의 주가·KOSPI 시계열로 "
+                "OLS 회귀(기본 5년 주봉)해서 구하고, R²(설명력)를 함께 준다 — R² 가 낮으면 "
+                "그 베타는 신뢰도가 낮다는 뜻이다. 비상장사는 industry 를 주면 Damodaran 산업 "
+                "무차입베타를 Hamada 식으로 재레버리지해 구한다. "
+                "**베타를 사용자에게 묻지 말고 이 도구를 먼저 쓸 것.**"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명."},
+                    "industry": {
+                        "type": "string",
+                        "description": "Damodaran 산업명 (예: Semiconductor, Food Processing). "
+                                       "비상장사이거나 회귀가 불가할 때 대체 경로로 쓰인다.",
+                    },
+                    "country": {"type": "string", "description": "국가 코드. 기본 KR."},
+                    "period": {"type": "string",
+                               "description": "회귀 주기: day | week | month. 기본 week."},
+                    "years": {"type": "integer", "description": "회귀 기간(년). 기본 5."},
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_industry_benchmarks": {
+        "fn": _industry_benchmarks,
+        "schema": {
+            "name": "get_industry_benchmarks",
+            "description": (
+                "Damodaran 산업 평균을 조회한다: 무차입베타(unlevered beta), 레버드베타, D/E, "
+                "목표 부채비중 D/(D+E), 실효세율. 비상장사 밸류에이션의 베타·자본구조 기준이나 "
+                "상장사의 교차검증에 쓴다. 산업명은 부분일치로 찾고, 못 찾으면 비슷한 이름을 "
+                "제안한다(예: Semiconductor, Food Processing, Software (Internet))."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "industry": {"type": "string", "description": "Damodaran 산업명."},
+                    "country": {"type": "string",
+                                "description": "국가 코드. KR/TW→신흥시장, US→미국, JP→글로벌."},
+                },
+                "required": ["industry"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "compute_wacc_auto": {
+        "fn": _wacc_auto,
+        "schema": {
+            "name": "compute_wacc_auto",
+            "description": (
+                "WACC 를 공시·시세에서 자동으로 구성한다 — β(회귀 또는 산업), Kd(공시 이자비용÷"
+                "차입금), D/(D+E)(차입금÷(차입금+시가총액)), Rf(ECOS/FRED), ERP·세율(Damodaran)을 "
+                "각각 도출해 조합한다. 어느 경로를 썼는지 note 에 전부 남는다. "
+                "**WACC 3대 입력(베타·타인자본비용·부채비중)을 사용자에게 묻기 전에 이 도구를 "
+                "먼저 쓸 것.** 특정 입력만 사용자가 지정하고 싶으면 해당 인자만 넘기면 된다."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명."},
+                    "country": {"type": "string", "description": "국가 코드. 기본 KR."},
+                    "industry": {"type": "string",
+                                 "description": "Damodaran 산업명. 비상장사나 시가총액이 없는 "
+                                                "경우의 대체 경로로 쓰인다."},
+                    "beta_override": {"type": "number", "description": "베타를 직접 지정."},
+                    "cost_of_debt_pct": {"type": "number",
+                                         "description": "세전 타인자본비용 %를 직접 지정."},
+                    "debt_to_value": {"type": "number",
+                                      "description": "목표 부채비중 D/(D+E), 0~1 을 직접 지정."},
+                    "debt_ratio_source": {
+                        "type": "string",
+                        "description": "부채비중 산출 경로: auto(시장가치 우선) | industry(산업평균).",
+                    },
+                },
+                "required": ["company"],
                 "additionalProperties": False,
             },
         },

@@ -48,13 +48,65 @@ ITEM_MAP: dict[str, tuple] = {
                                     "ifrs-full_IncomeTaxExpense"], ["법인세비용"]),
     "ppe": ("BS", ["ifrs-full_PropertyPlantAndEquipment"], ["유형자산"]),
     "cash": ("BS", ["ifrs-full_CashAndCashEquivalents"], ["현금및현금성자산"]),
+    # 운전자본 3항목 — 현금흐름표에 '자산부채의 변동' 합계가 없는 회사(SK하이닉스·네이버 실측)의
+    # ΔNWC 를 재무상태표 증감으로 직접 계산하기 위해 필요하다.
+    "trade_receivables": ("BS", ["ifrs-full_TradeAndOtherCurrentReceivables",
+                                  "ifrs-full_CurrentTradeReceivables"],
+                          ["매출채권", "매출채권 및 기타채권", "매출채권및기타채권"]),
+    "inventories": ("BS", ["ifrs-full_Inventories"], ["재고자산"]),
+    "trade_payables": ("BS", ["ifrs-full_TradeAndOtherCurrentPayables",
+                              "ifrs-full_CurrentTradePayables"],
+                       ["매입채무", "매입채무 및 기타채무", "매입채무및기타채무"]),
 }
 ITEM_LABEL = {
     "revenue": "매출액", "operating_income": "영업이익", "net_income": "당기순이익",
     "total_assets": "자산총계", "total_liabilities": "부채총계", "total_equity": "자본총계",
     "cogs": "매출원가", "sga": "판매비와관리비", "interest_expense": "이자비용(금융비용)",
     "tax_expense": "법인세비용", "ppe": "유형자산", "cash": "현금및현금성자산",
+    "trade_receivables": "매출채권", "inventories": "재고자산", "trade_payables": "매입채무",
 }
+
+# ── 현금흐름표 계정 태그 (실측 확인: 2026-08, 삼성전자·오리온 FY2025 연결) ─────────
+# 계정명(account_nm)은 회사마다 표현이 달라도 XBRL account_id 는 표준이라 태그를 우선한다.
+#
+# D&A: 이름으로 '상각비' 를 긁으면 **대손상각비**(bad debt)까지 섞여 들어간다(오리온 실측:
+# '대손상각비 조정' 5.9억이 D&A 에 가산됨) → 태그 우선, 이름 폴백 시 대손·손상 제외.
+_DA_TAGS = (
+    "ifrs-full_AdjustmentsForDepreciationExpense",
+    "ifrs-full_AdjustmentsForAmortisationExpense",
+    "ifrs-full_AdjustmentsForDepreciationAndAmortisationExpense",
+    "dart_AdjustmentsForDepreciationRightofuseAssets",
+    "dart_AdjustmentsForDepreciationInvestmentProperty",
+    "dart_AdjustmentsForAmortisationOfIntangibleAssets",
+)
+_DA_NAME_INCLUDE = ("감가상각", "상각비")
+_DA_NAME_EXCLUDE = ("대손", "손상")  # 대손상각비·손상차손은 D&A 가 아니다
+
+# 이자: 손익 '금융비용'(ifrs-full_FinanceCosts)은 환차손·파생손실까지 포함해 Kd 산정에 쓸 수
+# 없다(삼성전자 FY2025 실측: 금융비용 11.7조 / 차입금 24.1조 → Kd 48.8% 라는 비상식적 값).
+# 이자 전용 계정을 쓴다 — 발생주의(이자비용 조정) 우선, 없으면 현금주의(이자의 지급).
+_INTEREST_ACCRUAL_TAGS = ("dart_AdjustmentsForInterestExpenses",
+                          "ifrs-full_AdjustmentsForInterestExpense")
+_INTEREST_PAID_TAGS = ("ifrs-full_InterestPaidClassifiedAsOperatingActivities",
+                       "ifrs-full_InterestPaid",
+                       "ifrs-full_InterestPaidClassifiedAsFinancingActivities")
+_CAPEX_TANGIBLE_TAGS = (
+    "ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",)
+_CAPEX_INTANGIBLE_TAGS = (
+    "ifrs-full_PurchaseOfIntangibleAssetsClassifiedAsInvestingActivities",)
+
+
+def _da_rows(cf_rows: list) -> list:
+    """CF 에서 D&A 로 인정할 행들. 태그 매칭 우선, 없으면 이름 매칭(대손·손상 제외)."""
+    tagged = [r for r in cf_rows if r.get("account_id") in _DA_TAGS]
+    if tagged:
+        return tagged
+    out = []
+    for r in cf_rows:
+        nm = r.get("account_nm") or ""
+        if any(x in nm for x in _DA_NAME_INCLUDE) and not any(x in nm for x in _DA_NAME_EXCLUDE):
+            out.append(r)
+    return out
 
 
 # ── 기업 매핑 ────────────────────────────────────────────────────
@@ -486,24 +538,29 @@ def cf_extras_nyear(company: str, n: int = 5, year: int | None = None, report: s
         return [{"year": y, "amount": out.get(y)} for y in years_needed]
 
     capex = _series(lambda rows: _match_row(
-        rows, ["ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities"],
-        all_of=["유형자산의취득"]))
+        rows, list(_CAPEX_TANGIBLE_TAGS), all_of=["유형자산의취득"]))
+    capex_intangible = _series(lambda rows: _match_row(
+        rows, list(_CAPEX_INTANGIBLE_TAGS), all_of=["무형자산의취득"]))
     ocf = _series(lambda rows: _match_row(
         rows, ["ifrs-full_CashFlowsFromUsedInOperatingActivities"], all_of=["영업활동", "현금흐름"]))
     nwc = _series(lambda rows: _match_row(
         rows, ["dart_AdjustmentsForAssetsLiabilitiesOfOperatingActivities"],
         any_of=["운전자본", "자산부채"]))
+    interest = _series(lambda rows: _match_row(rows, list(_INTEREST_ACCRUAL_TAGS))
+                       or _match_row(rows, list(_INTEREST_PAID_TAGS), any_of=["이자의지급", "이자지급"]))
 
+    # D&A 는 회사에 따라 여러 행(감가상각비/무형자산상각비/사용권자산)으로 쪼개져 있어 합산한다.
+    # 태그 기반(_da_rows)이라 대손상각비는 섞이지 않는다. 삼성전자처럼 '조정' 한 줄에 뭉쳐
+    # 공시하는 회사는 아무 행도 안 잡혀 None → 가정 필요(조용히 0 으로 채우지 않는다).
     da_out: dict[int, int] = {}
     for anchor_yr, cf_rows in anchors.items():
-        da_rows = [r for r in cf_rows
-                  if "감가상각" in (r.get("account_nm") or "") or "상각비" in (r.get("account_nm") or "")]
+        rows_da = _da_rows(cf_rows)
         for amt_key, offset in (("thstrm_amount", 0), ("frmtrm_amount", 1), ("bfefrmtrm_amount", 2)):
             y = anchor_yr - offset
             if y not in years_needed or y in da_out:
                 continue
             total, any_found = 0, False
-            for r in da_rows:
+            for r in rows_da:
                 a = _to_int(r.get(amt_key))
                 if a is not None:
                     total, any_found = total + a, True
@@ -511,8 +568,9 @@ def cf_extras_nyear(company: str, n: int = 5, year: int | None = None, report: s
                 da_out[y] = total
     da = [{"year": y, "amount": da_out.get(y)} for y in years_needed]
 
-    return {"corp_name": ent["corp_name"], "capex": capex, "ocf": ocf,
-            "nwc_change": nwc, "da": da}
+    return {"corp_name": ent["corp_name"], "capex": capex,
+            "capex_intangible": capex_intangible, "ocf": ocf,
+            "nwc_change": nwc, "da": da, "interest": interest}
 
 
 def debt_balances(company: str, year: int | None = None, report: str = "annual",
@@ -527,12 +585,19 @@ def debt_balances(company: str, year: int | None = None, report: str = "annual",
     bs_rows = [r for r in rows if r.get("sj_div") == "BS"]
 
     st_amt, lt_amt, st_rcept, lt_rcept = 0, 0, None, None
+    lease_amt, lease_rcept = 0, None
     for r in bs_rows:
         nm = _norm_label(r.get("account_nm") or "")
-        if "차입금" not in nm and "사채" not in nm:
-            continue
         amt = _to_int(r.get("thstrm_amount"))
         if amt is None:
+            continue
+        # 리스부채(IFRS 16)는 이자부담 부채지만 '차입금/사채' 라는 이름이 아니라 따로 모은다.
+        # 기존 호출부 호환을 위해 short_term/long_term 합계에는 넣지 않고 별도 키로 돌려준다.
+        if "리스부채" in nm:
+            lease_amt += amt
+            lease_rcept = lease_rcept or r.get("rcept_no")
+            continue
+        if "차입금" not in nm and "사채" not in nm:
             continue
         is_short = ("단기" in nm) or ("유동성" in nm) or ("유동" in nm and "비유동" not in nm)
         if is_short:
@@ -541,7 +606,7 @@ def debt_balances(company: str, year: int | None = None, report: str = "annual",
         else:
             lt_amt += amt
             lt_rcept = lt_rcept or r.get("rcept_no")
-    rcept = st_rcept or lt_rcept
+    rcept = st_rcept or lt_rcept or lease_rcept
 
     def _v(amt: int, label: str) -> Value:
         return Value(
@@ -555,7 +620,8 @@ def debt_balances(company: str, year: int | None = None, report: str = "annual",
             ),
         )
     return {"short_term": _v(st_amt, "단기차입금(유동성장기부채 포함)"),
-            "long_term": _v(lt_amt, "장기차입금")}
+            "long_term": _v(lt_amt, "장기차입금"),
+            "lease": _v(lease_amt, "리스부채(유동+비유동)")}
 
 
 def cf_extras(company: str, year: int | None = None, report: str = "annual",
@@ -591,22 +657,29 @@ def cf_extras(company: str, year: int | None = None, report: str = "annual",
         return None, None
 
     capex, capex_rcept = _by_tag_or_name(
-        ["ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities"],
-        all_of=["유형자산의취득"])
+        list(_CAPEX_TANGIBLE_TAGS), all_of=["유형자산의취득"])
+    capex_int, capex_int_rcept = _by_tag_or_name(
+        list(_CAPEX_INTANGIBLE_TAGS), all_of=["무형자산의취득"])
     ocf, ocf_rcept = _by_tag_or_name(
         ["ifrs-full_CashFlowsFromUsedInOperatingActivities"], all_of=["영업활동", "현금흐름"])
     nwc, nwc_rcept = _by_tag_or_name(
         ["dart_AdjustmentsForAssetsLiabilitiesOfOperatingActivities"],
         any_of=["운전자본", "자산부채"])
 
+    # 이자: 발생주의(이자비용 조정) 우선, 없으면 현금주의(이자의 지급). 어느 쪽을 썼는지 남긴다.
+    interest, interest_rcept = _by_tag_or_name(list(_INTEREST_ACCRUAL_TAGS))
+    interest_basis = "발생주의(CF 이자비용 조정)"
+    if interest is None:
+        interest, interest_rcept = _by_tag_or_name(list(_INTEREST_PAID_TAGS),
+                                                   any_of=["이자의지급", "이자지급"])
+        interest_basis = "현금주의(CF 이자의 지급)"
+
     da_total, da_rcept = None, None
-    for r in cf_rows:
-        nm = r.get("account_nm") or ""
-        if "감가상각" in nm or "상각비" in nm:
-            amt = _to_int(r.get("thstrm_amount"))
-            if amt is not None:
-                da_total = (da_total or 0) + amt
-                da_rcept = da_rcept or r.get("rcept_no")
+    for r in _da_rows(cf_rows):
+        amt = _to_int(r.get("thstrm_amount"))
+        if amt is not None:
+            da_total = (da_total or 0) + amt
+            da_rcept = da_rcept or r.get("rcept_no")
 
     rcept = capex_rcept or ocf_rcept or nwc_rcept or da_rcept
 
@@ -625,11 +698,158 @@ def cf_extras(company: str, year: int | None = None, report: str = "annual",
         )
     return {
         "capex": _v(capex, "유형자산의 취득(CAPEX)"),
+        "capex_intangible": _v(capex_int, "무형자산의 취득"),
         "ocf": _v(ocf, "영업활동현금흐름"),
         "nwc_change": _v(nwc, "영업활동으로 인한 자산부채의 변동"),
-        "da": _v(da_total, "감가상각비(CF 조정 합산)",
-                note=f"'감가상각'/'상각비' 포함 CF 행 합산. corp_code={ent['corp_code']}"),
+        "da": _v(da_total, "감가상각비·무형자산상각비(CF 조정 합산)",
+                note=f"D&A 표준계정 태그 행 합산(대손상각비 제외). corp_code={ent['corp_code']}"),
+        "interest": _v(interest, f"이자비용 [{interest_basis}]",
+                      note=f"{interest_basis}. 손익 '금융비용'은 환차손 등을 포함해 Kd 산정에 "
+                           f"부적합하므로 이자 전용 계정을 사용. corp_code={ent['corp_code']}"),
     }
+
+
+# ── D&A 주석 파싱 (CF 에 D&A 가 없는 회사용) ─────────────────────────
+# 삼성전자·SK하이닉스처럼 현금흐름표에서 D&A 를 '조정' 한 줄에 뭉쳐 공시하는 회사는 CF 로
+# D&A 를 분리할 수 없다. 대신 IFRS 가 요구하는 **비용의 성격별 분류** 주석에 총 D&A 가 나온다
+# (실측 확인 2026-08: SK하이닉스 FY2025 '감가상각비 및 무형자산 상각 10,558,323' 백만원).
+_DA_NOTE_LABELS = (
+    "감가상각비 및 무형자산 상각",
+    "감가상각비 및 무형자산상각",
+    "감가상각비및무형자산상각",
+    "감가상각비와 무형자산상각",
+    "감가상각비 및 무형자산 상각비",
+    "감가상각비 및 상각비",
+)
+_UNIT_MULT = {"백만원": 10 ** 6, "십억원": 10 ** 9, "억원": 10 ** 8,
+              "천원": 10 ** 3, "원": 1}
+_UNIT_RE = re.compile(r"단위\s*[:：]\s*([가-힣]+원)")
+_NUM_RE = re.compile(r"\(?\s*(\d[\d,]{2,})\s*\)?")
+
+
+_DA_SECTION_ANCHORS = ("비용의 성격별 분류", "영업비용의 내역", "영업비용")
+# 성격별 분류표에서 D&A 로 합산할 구성요소. 각 그룹에서 **처음 발견된 라벨 하나**만 취해
+# 합산한다(같은 개념의 다른 표기를 이중계상하지 않도록).
+# 사용권자산상각비(IFRS 16 리스)는 D&A 에 포함한다 — 현금흐름표 경로(_DA_TAGS)도
+# dart_AdjustmentsForDepreciationRightofuseAssets 를 포함하므로 두 경로가 일관된다.
+_DA_COMPONENT_GROUPS = (
+    ("감가상각비", "감가상각"),
+    ("무형자산상각비", "무형자산 상각비", "무형자산상각"),
+    ("사용권자산상각비", "사용권자산 상각비", "사용권자산감가상각비"),
+)
+
+
+def _amount_after(text: str, label: str, unit_mult: int) -> int | None:
+    """표에서 label 바로 뒤 첫 숫자(=당기 열)를 읽는다."""
+    pos = text.find(label)
+    if pos < 0:
+        return None
+    m = _NUM_RE.search(text[pos + len(label): pos + len(label) + 60])
+    return int(m.group(1).replace(",", "")) * unit_mult if m else None
+
+
+def da_from_notes(company: str, year: int | None = None, report: str = "annual",
+                  prefer: str = "CFS") -> Value:
+    """비용의 성격별 분류(영업비용) 주석에서 총 D&A 를 뽑는다.
+
+    현금흐름표에 D&A 가 분리돼 있으면 `cf_extras` 가 낫다 — 이건 그게 없을 때의 보완 경로다.
+    회사마다 표기가 둘로 갈린다(실측 2026-08):
+      · 합산 1줄: SK하이닉스 '감가상각비 및 무형자산 상각' 10,558,323백만원
+      · 분리 2줄: 네이버 '감가상각비' 135,492,430천원 + '무형자산상각비'
+    '감가상각비' 라는 말은 유형자산 증감표·기능별 배분표에도 나오므로 **성격별 분류 섹션을
+    앵커로 잡고 그 뒤 구간에서만** 읽는다. 마지막으로 **매출 대비 0.3~40%** 를 벗어나면 다른
+    표를 잘못 읽은 것으로 보고 채택하지 않는다(조용히 틀린 값을 내지 않는다)."""
+    reprt_code = REPRT.get(report, "11011")
+    ent = resolve(company)
+    yr = year if year is not None else _latest_year(ent["corp_code"], reprt_code, prefer)
+    rows, _ = _statement_rows(ent["corp_code"], yr, reprt_code, prefer)
+    rcept = next((r.get("rcept_no") for r in rows if r.get("rcept_no")), None)
+    if not rcept:
+        raise DataError(f"{ent['corp_name']} {yr} 보고서 접수번호를 찾지 못했습니다.")
+
+    rev = financial_item(company, "revenue", yr, report, prefer).value
+
+    def _accept(amount: int, how: str, excerpt: str, unit_name: str) -> Value | None:
+        ratio = amount / rev if rev else 0
+        if not 0.003 <= ratio <= 0.40:
+            return None
+        return Value(
+            value=amount, unit="KRW",
+            label=f"{ent['corp_name']} 감가상각비+무형자산상각비 ({yr})",
+            provenance=Provenance(
+                source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
+                source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
+                original_field=f"주석/비용의 성격별 분류/{how}", as_of=f"FY{yr}",
+                filing_date=_filing_date(rcept),
+                note=(f"현금흐름표에 D&A 가 분리돼 있지 않아 주석에서 추출({how}, 단위 "
+                      f"{unit_name}, 매출 대비 {ratio * 100:.1f}%). 발췌: …{excerpt[:160]}…"),
+            ),
+        )
+
+    # (1) 합산 1줄 표기
+    for label in _DA_NOTE_LABELS:
+        try:
+            res = filing_text(rcept, keyword=label, context_chars=1500, max_matches=8)
+        except DataError:
+            continue
+        for ex in res.get("excerpts", []):
+            pos = ex.find(label)
+            if pos < 0:
+                continue
+            units = _UNIT_RE.findall(ex[:pos])
+            if not units:
+                continue
+            amt = _amount_after(ex[pos:], label, _UNIT_MULT.get(units[-1], 0))
+            if not amt:
+                continue
+            v = _accept(amt, label, ex[max(0, pos - 60):pos + 140], units[-1])
+            if v is not None:
+                return v
+
+    # (2) 성격별 분류 섹션 앵커 → 그 구간에서 감가상각비 (+ 무형자산상각비) 합산
+    for anchor in _DA_SECTION_ANCHORS:
+        try:
+            res = filing_text(rcept, keyword=anchor, context_chars=2200, max_matches=6)
+        except DataError:
+            continue
+        for ex in res.get("excerpts", []):
+            pos = ex.find(anchor)
+            if pos < 0:
+                continue
+            window = ex[pos:]
+            units = _UNIT_RE.findall(window[:400]) or _UNIT_RE.findall(ex[:pos])
+            if not units:
+                continue
+            mult = _UNIT_MULT.get(units[0] if _UNIT_RE.findall(window[:400]) else units[-1], 0)
+            if not mult:
+                continue
+            total, parts = 0, []
+            for group in _DA_COMPONENT_GROUPS:
+                for lab in group:
+                    amt = _amount_after(window, lab, mult)
+                    if amt:
+                        total += amt
+                        parts.append(lab)
+                        break  # 같은 개념의 다른 표기를 중복 합산하지 않는다
+            if not total or not parts:
+                continue
+            v = _accept(total, f"{anchor} 섹션의 {'+'.join(parts)}", window[:200], units[0])
+            if v is not None:
+                return v
+
+    raise DataError(
+        f"{ent['corp_name']} {yr} 주석에서 D&A(감가상각비+무형자산상각비)를 찾지 못했습니다. "
+        f"D&A 를 가정으로 직접 지정하세요."
+    )
+
+
+def da_best(company: str, year: int | None = None, report: str = "annual",
+            prefer: str = "CFS") -> Value:
+    """D&A 를 얻는 최선의 경로: 현금흐름표 → (없으면) 성격별 분류 주석."""
+    cf = cf_extras(company, year, report, prefer)
+    if cf.get("da") is not None:
+        return cf["da"]
+    return da_from_notes(company, year, report, prefer)
 
 
 def shares_outstanding(company: str, year: int | None = None, report: str = "annual") -> Value:
