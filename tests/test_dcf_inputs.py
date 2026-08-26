@@ -229,9 +229,31 @@ def test_cost_of_debt_refuses_when_no_debt(monkeypatch):
 
 
 def test_cost_of_debt_refuses_without_interest_account(monkeypatch):
+    # debt_balances 도 함께 스텁해야 한다 — 안 그러면 실제 provider 가 불려 키 없는 CI 에서는
+    # DataError(키 없음) → 비상장 감사보고서 폴백으로 새어나가 다른 오류가 난다.
     monkeypatch.setattr(dart, "cf_extras", lambda *a, **k: {"interest": None})
+    monkeypatch.setattr(dart, "debt_balances", lambda *a, **k: {
+        "short_term": _v(100, "테스트 단기차입금"), "long_term": _v(0), "lease": _v(0)})
     with pytest.raises(DataError, match="이자비용"):
         dcf_inputs.cost_of_debt("테스트")
+
+
+def test_cost_of_debt_falls_back_to_audit_report_when_api_has_no_data(monkeypatch):
+    """상장 API 가 013(데이터 없음)을 내면 비상장 감사보고서 경로로 넘어가야 한다."""
+    def boom(*a, **k):
+        raise DataError("DART 재무제표 오류: 013 조회된 데이타가 없습니다.")
+
+    monkeypatch.setattr(dart, "cf_extras", boom)
+    monkeypatch.setattr(dart, "debt_balances", boom)
+    monkeypatch.setattr(dcf_inputs, "_audit", lambda company, year=None: {
+        "_name": "비상장테스트", "_year": 2025, "_rcept": "R1",
+        "interest_paid": {"amount": 2_900_000_000},
+        "short_term_debt": {"amount": 60_000_000_000},
+    })
+    kd = dcf_inputs.cost_of_debt("비상장테스트")
+    assert kd.value == pytest.approx(4.83, abs=0.01)
+    assert "감사보고서" in kd.provenance.source
+    assert "비상장" in kd.provenance.note
 
 
 # ── 영구성장률 ────────────────────────────────────────────────────

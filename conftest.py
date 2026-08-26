@@ -21,3 +21,11 @@ os.environ["DEPLOY_MODE"] = "1"
 os.environ["LLM_PROVIDER"] = "openai"
 os.environ["OPENAI_API_KEY"] = "sk-test-ci-placeholder-not-a-real-key"
 os.environ["SESSION_SECRET"] = "test-session-secret-do-not-use-in-production"
+
+# provider API 키는 **비운다** — 개발자 PC 의 .env 때문에 로컬만 통과하고 CI(키 없음)에서
+# 터지는 일을 막는다. 실제로 그런 사고가 있었다: 스텁을 덜 건 테스트가 로컬에서는 진짜
+# DART 를 호출해 통과하고, 키가 없는 CI 에서는 다른 예외가 나서 실패했다.
+# 네트워크를 타야 하는 검증은 pytest 가 아니라 별도 스크립트로 돌린다.
+for _key in ("DART_API_KEY", "ECOS_API_KEY", "FRED_API_KEY", "GEMINI_API_KEY",
+             "EDINET_API_KEY", "FINMIND_TOKEN", "OPENFIGI_API_KEY", "ANTHROPIC_API_KEY"):
+    os.environ[_key] = ""
