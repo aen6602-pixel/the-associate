@@ -272,9 +272,23 @@ def ask(body: AskBody, viewer: auth.Viewer = Depends(current_viewer)) -> Streami
 
 
 # ── 산출물 내보내기 (저장된 trace 를 서버가 다시 계산) ──────────────
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# 내보내기 종류 → (필요한 tool 이름, 워크북 생성 함수 이름, MIME, 없을 때 안내)
+# 엑셀은 그 답변에서 **실제로 호출된 계산 도구의 입력을 그대로 재사용**해 만든다 —
+# 화면에 보인 숫자와 파일의 숫자가 어긋나지 않게 하려는 것이고, 클라이언트 입력을 믿지 않는다.
+_XLSX_EXPORTS = {
+    "dcf_full": ("compute_dcf", "dcf_full_workbook", "이 답변에는 DCF 계산이 없습니다."),
+    "dcf": ("compute_dcf", "dcf_workbook", "이 답변에는 DCF 계산이 없습니다."),
+    "sangjeung": ("evaluate_sangjeung_value", "sangjeung_workbook",
+                  "이 답변에는 상증법 평가가 없습니다."),
+    "comps": ("compute_comps", "comps_workbook", "이 답변에는 Comps 계산이 없습니다."),
+}
+
+
 class ExportBody(BaseModel):
     index: int = Field(ge=0)          # 세션 messages 안의 assistant 메시지 위치
-    kind: str                         # "dcf_full" | "html_report"
+    kind: str                         # _XLSX_EXPORTS 의 키 또는 "html_report"
 
 
 def _attachment(data: bytes, filename: str, media_type: str) -> Response:
@@ -297,17 +311,17 @@ def export(sid: str, body: ExportBody,
     trace = msg.get("trace") or []
 
     try:
-        if body.kind == "dcf_full":
+        spec = _XLSX_EXPORTS.get(body.kind)
+        if spec is not None:
+            tool_name, builder_name, missing = spec
             call = next((t for t in trace
-                         if t["name"] == "compute_dcf" and t["result"].get("ok")), None)
+                         if t["name"] == tool_name and t["result"].get("ok")), None)
             if call is None:
-                raise HTTPException(status_code=400, detail="이 답변에는 DCF 계산이 없습니다.")
-            from excel.exporters import dcf_full_workbook
+                raise HTTPException(status_code=400, detail=missing)
+            from excel import exporters
 
-            data, fname = dcf_full_workbook(**call["input"])
-            return _attachment(
-                data, fname,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            data, fname = getattr(exporters, builder_name)(**call["input"])
+            return _attachment(data, fname, XLSX_MIME)
 
         if body.kind == "html_report":
             from excel.html_report import build_html_report

@@ -333,9 +333,19 @@ function messageHtml(m, index) {
       <div class="body">${esc(m.content)}</div></div>`;
   }
   const trace = m.trace || [];
-  const hasDcf = trace.some((t) => t.name === 'compute_dcf' && (t.result || {}).ok);
+  // 그 답변에서 실제로 성공한 계산 도구에 대응하는 엑셀만 제안한다 —
+  // 계산하지 않은 방법의 버튼을 띄우면 눌러도 400 이 나서 혼란만 준다.
+  const ran = (tool) => trace.some((t) => t.name === tool && (t.result || {}).ok);
+  const xlsx = [
+    ['compute_dcf', 'dcf_full', '📥 DCF 전체 모델 (5시트)'],
+    ['compute_dcf', 'dcf', '📥 DCF 요약 (1시트)'],
+    ['compute_comps', 'comps', '📥 Comps 엑셀'],
+    ['evaluate_sangjeung_value', 'sangjeung', '📥 상증법 평가 엑셀'],
+  ].filter(([tool]) => ran(tool));
+
   const exports = trace.length ? `<div class="exports">
-      ${hasDcf ? `<button class="ghost sm" data-export="dcf_full" data-index="${index}">📥 전체 DCF 모델 (5시트)</button>` : ''}
+      ${xlsx.map(([, kind, label]) =>
+        `<button class="ghost sm" data-export="${kind}" data-index="${index}">${label}</button>`).join('')}
       <button class="ghost sm" data-export="html_report" data-index="${index}">📄 HTML 리포트</button>
     </div>` : '';
 
@@ -384,7 +394,8 @@ async function download(index, kind) {
   }
   const disp = res.headers.get('Content-Disposition') || '';
   const m = /filename\*=UTF-8''([^;]+)/i.exec(disp);
-  const name = m ? decodeURIComponent(m[1]) : (kind === 'dcf_full' ? 'model.xlsx' : 'report.html');
+  const name = m ? decodeURIComponent(m[1])
+    : (kind === 'html_report' ? 'report.html' : `${kind}.xlsx`);
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
