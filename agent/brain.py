@@ -120,6 +120,26 @@ tool 쌍으로 찾는다:
 """
 
 
+def _system_prompt() -> str:
+    """기본 프롬프트 + 등록된 절차서 목록(이름·설명만).
+
+    절차서 본문은 넣지 않는다 — 지금도 25KB 라 전부 상주시키면 매 요청이 무거워지고 tool-calling
+    정확도가 떨어진다. 두뇌가 필요하다고 판단할 때 load_skill 로 가져간다."""
+    from core import skills
+
+    roster = skills.roster_text()
+    if not roster:
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT + f"""
+## 작업 절차서(skill)
+아래 절차서가 등록돼 있다. 정식 가치평가·보고서처럼 **절차와 승인이 중요한 작업**을 요청받으면
+계산을 시작하기 전에 `load_skill` 로 해당 절차서를 읽고 그대로 따른다. 단순 데이터 조회
+("삼성전자 매출액", "한국 ERP")에는 부르지 않는다.
+
+{roster}
+"""
+
+
 MAX_HISTORY_TURNS = 20  # 컨텍스트 폭주 방지 — 최근 N개 메시지만 두뇌에 전달
 
 
@@ -177,7 +197,7 @@ def _answer_gemini(question: str, history: list[dict], max_rounds: int,
         for t in registry.tool_schemas()
     ]
     cfg = types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
+        system_instruction=_system_prompt(),
         tools=[types.Tool(function_declarations=decls)],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         temperature=0,
@@ -258,7 +278,7 @@ def _venv_python() -> str:
 def _cli_system_prompt() -> str:
     py = _venv_python()
     lines = [
-        SYSTEM_PROMPT,
+        _system_prompt(),
         "",
         "## SKSQ 데이터 도구 호출 방법",
         f"Bash 로 다음 형태로 실행: {py} -m agent.tool_cli <tool_name> '<JSON 인자>'",
@@ -390,7 +410,7 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
     for _ in range(max_rounds):
         try:
             resp = client.responses.create(
-                model=model, instructions=SYSTEM_PROMPT, input=input_list, tools=tools,
+                model=model, instructions=_system_prompt(), input=input_list, tools=tools,
             )
         except openai.APIStatusError as e:
             yield {"type": "error", "text": f"OpenAI API 오류 {e.status_code}: {e.message}"}

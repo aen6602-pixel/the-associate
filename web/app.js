@@ -120,6 +120,7 @@ async function enterApp() {
   state.model = eng ? eng.default_model : null;
   renderEngine();
   renderSources(data.sources, data.roadmap);
+  renderSkills(data.skills || []);
 
   const s = await api('/api/sessions');
   state.sessions = s.sessions;
@@ -235,6 +236,21 @@ function renderSources(srcs, roadmap) {
   }
   html += '</div>';
   $('source-groups').innerHTML = html;
+}
+
+/* ── 절차서(playbook) ────────────────────────────────── */
+function renderSkills(list) {
+  $('skills-section').hidden = !list.length;
+  if (!list.length) return;
+  $('skill-list').innerHTML = list.map((s) => `
+    <details class="src">
+      <summary><span>📘 ${esc(s.name)}</span></summary>
+      <div class="src-body">
+        <p>${esc(s.description)}</p>
+        ${s.references.length
+          ? `<p class="hint">참조: ${s.references.map((r) => esc(r)).join(', ')}</p>` : ''}
+      </div>
+    </details>`).join('');
 }
 
 /* ── 대화 목록 ───────────────────────────────────────── */

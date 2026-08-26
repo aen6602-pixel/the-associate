@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Callable
 
 from core.schema import Value, Provenance, SourceType, DataError
+from core import skills as skills_lib
 from providers import damodaran, fx, ecos, fred, dart, sec, edinet, finmind, openfigi, mops
 from engines import (wacc as wacc_engine, sangjeung as sangjeung_engine,
                      dcf as dcf_engine, comps as comps_engine,
@@ -256,6 +257,34 @@ def _wacc_auto(company: str, country: str = "KR", industry: str | None = None,
         company, country, _blank(industry), "10Y", _pos(beta_override),
         _pos(cost_of_debt_pct), _pos(debt_to_value), _blank(debt_ratio_source) or "auto",
         _blank(market), _blank(symbol), _pos(risk_free_pct))
+
+
+# ── Skill (절차서) 로딩 ───────────────────────────────────────────
+def _text_value(label: str, body: str, note: str, source: str) -> Value:
+    """긴 텍스트를 Value 로 감싼다 — 숫자가 아니라 절차서이므로 value 는 길이만 담는다."""
+    return Value(
+        value=len(body), unit="자", label=label,
+        provenance=Provenance(source=source, source_type=SourceType.REFERENCE,
+                              source_url="(repo: skills/)", note=note),
+        extras={},
+        text=body,
+    )
+
+
+def _load_skill(name: str) -> Value:
+    s = skills_lib.load(_blank(name) or "")
+    refs = ", ".join(s["references"]) or "(없음)"
+    return _text_value(
+        f"skill: {s['name']}", s["body"],
+        f"{s['description']} · 참조 파일: {refs} "
+        f"(필요한 것만 read_skill_reference 로 추가로 읽어라)",
+        "절차서(skills/)")
+
+
+def _read_skill_reference(name: str, file: str) -> Value:
+    r = skills_lib.reference(_blank(name) or "", _blank(file) or "")
+    return _text_value(f"skill: {r['name']} / {r['file']}", r["body"],
+                       f"{r['name']} 절차서의 참조 파일 {r['file']}", "절차서(skills/)")
 
 
 _COUNTRY_PROP = {
@@ -748,6 +777,50 @@ REGISTRY: dict[str, dict] = {
                     "tenor": {"type": "string", "description": "무위험수익률 만기. 기본 10Y."},
                 },
                 "required": ["country", "beta", "cost_of_debt_pct", "debt_to_value"],
+                "additionalProperties": False,
+            },
+        },
+    },
+
+    # ── 절차서(skill) ─────────────────────────────────────────────────────────
+    "load_skill": {
+        "fn": _load_skill,
+        "schema": {
+            "name": "load_skill",
+            "description": (
+                "등록된 작업 절차서(skill)를 읽는다. 절차서는 '어떻게 일할지' 를 정한 문서로, "
+                "정식 밸류에이션 보고서처럼 승인 게이트·검증 체크리스트가 필요한 작업에 쓴다. "
+                "**사용자가 정식 가치평가·보고서를 요청하면 계산을 시작하기 전에 먼저 이걸 "
+                "부른다.** 본문에 참조 파일 목록이 오면 필요한 것만 read_skill_reference 로 "
+                "추가로 읽는다(전부 읽지 말 것). 단순 데이터 조회 질문에는 쓰지 않는다."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "절차서 이름 (시스템 프롬프트의 목록 참고)."},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "read_skill_reference": {
+        "fn": _read_skill_reference,
+        "schema": {
+            "name": "read_skill_reference",
+            "description": (
+                "절차서의 참조 파일 하나를 읽는다. load_skill 결과가 가리키는 파일 중 "
+                "**지금 단계에 필요한 것만** 읽는다(예: DCF 를 하기로 정했으면 dcf.md 만)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "절차서 이름."},
+                    "file": {"type": "string",
+                             "description": "참조 파일명 (예: dcf.md, validation.md)."},
+                },
+                "required": ["name", "file"],
                 "additionalProperties": False,
             },
         },

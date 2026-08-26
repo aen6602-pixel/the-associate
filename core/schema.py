@@ -66,6 +66,9 @@ class Value:
     provenance: Provenance
     label: Optional[str] = None
     extras: Optional[dict[str, "Value"]] = None  # 함께 보여줄 연관 수치 (예: DCF의 EV·지분가치)
+    # 숫자가 아닌 본문(예: skills/ 의 절차서). 두뇌가 읽어야 하는 텍스트를 담되, 이 필드가
+    # 있다고 해서 원칙이 바뀌지는 않는다 — 여전히 숫자는 provider/engine 만 만든다.
+    text: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {
@@ -76,6 +79,8 @@ class Value:
         }
         if self.extras:
             d["extras"] = {k: v.to_dict() for k, v in self.extras.items()}
+        if self.text is not None:
+            d["text"] = self.text
         return d
 
     def __repr__(self) -> str:

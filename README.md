@@ -53,6 +53,22 @@ copy .env.example .env   # 값 채우기
 
 `SKSQ_실행.bat` 을 더블클릭해도 같은 서버가 뜨고 브라우저가 열린다.
 
+## 작업 절차서 (skills)
+
+`skills/<이름>/SKILL.md` 하나가 절차서 하나다. 정식 가치평가처럼 **절차와 승인이 중요한 작업**을
+요청받으면 두뇌가 `load_skill` 로 읽고 그대로 따른다.
+
+```
+skills/valuation-agent/
+  SKILL.md                 # frontmatter(name·description) + 절차
+  references/*.md          # 방법별 세부 규칙 (필요한 것만 read_skill_reference 로 읽음)
+```
+
+시스템 프롬프트에는 **이름·설명만** 들어가고 본문은 호출 시점에만 로드된다(progressive
+disclosure) — 전부 상주시키면 매 요청이 무거워지고 tool-calling 정확도가 떨어진다.
+
+**추가하려면**: `skills/` 밑에 폴더를 만들고 `SKILL.md` 를 두면 끝이다. 코드 수정은 없다.
+
 ## 배포
 
 Railway(Nixpacks) + GitHub 자동배포. `main` 에 push 하면 CI 통과 후 자동으로 올라간다.

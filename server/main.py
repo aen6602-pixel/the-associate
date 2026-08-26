@@ -24,7 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent import brain
-from core import admin, auth, config, history as hist, markdown, paths, sources
+from core import (admin, auth, config, history as hist, markdown, paths,
+                  skills as skills_lib, sources)
 
 log = logging.getLogger("associate")
 
@@ -162,6 +163,8 @@ def bootstrap(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
         "sources": [_src(s) for s in sources.SOURCES],
         "roadmap": [{"name": r["name"], "org": r["org"], "provides": r["provides"]}
                     for r in sources.ROADMAP],
+        "skills": [{"name": s["name"], "description": s["description"],
+                    "references": s["references"]} for s in skills_lib.available()],
     }
 
 
