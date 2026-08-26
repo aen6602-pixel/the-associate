@@ -19,6 +19,10 @@ _ORDERED = re.compile(r"^(\d{1,3})[.)]\s+(.*)$")
 _QUOTE = re.compile(r"^>\s?(.*)$")
 _RULE = re.compile(r"^([-*_])\1{2,}$")
 _FENCE = re.compile(r"^```(\w*)\s*$")
+# ```decision 블록 — 의사결정을 카드로 렌더한다(불릿으로 늘어놓으면 스캔이 안 된다).
+_DECISION_META = ("id", "title", "recommend", "note", "impact")
+_DECISION_LINE = re.compile(r"^\s*([A-Za-z_]+)\s*:\s*(.*)$")
+_OPTION_KEY = re.compile(r"^[A-E]$")
 _TABLE_DIVIDER = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$")
 
 # escape 된 텍스트 위에서 도는 인라인 규칙 (순서 중요: 코드 먼저 → 그 안은 더 안 건드림)
@@ -56,6 +60,59 @@ def render_inline(escaped: str) -> str:
     return text
 
 
+def _decision_html(lines: list[str], seq: int) -> str:
+    """```decision 블록 → 선택 가능한 카드.
+
+    형식(순서 무관, 전부 선택):
+        id: 1                 없으면 등장 순서로 번호
+        title: D&A/매출
+        recommend: A
+        note: 2024년 값이 이상치일 수 있음
+        A: 사용자가 직접 입력
+        B: DCF 중단
+    """
+    meta: dict[str, str] = {}
+    options: list[tuple[str, str]] = []
+    for raw in lines:
+        m = _DECISION_LINE.match(raw)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        if _OPTION_KEY.match(key.upper()) and len(key) == 1:
+            options.append((key.upper(), val))
+        elif key.lower() in _DECISION_META:
+            meta[key.lower()] = val
+
+    if not options:   # 형식이 틀렸으면 원문을 코드블록으로 보여준다(내용을 숨기지 않는다)
+        return "<pre><code>" + html.escape("\n".join(lines)) + "</code></pre>"
+
+    did = meta.get("id") or str(seq)
+    rec = (meta.get("recommend") or "").strip().upper()[:1]
+    out = [f'<div class="decision" data-decision="{html.escape(did)}">',
+           '<div class="decision-head">',
+           f'<span class="decision-no">{html.escape(did)}</span>',
+           f'<span class="decision-title">{render_inline(html.escape(meta.get("title", "")))}</span>',
+           "</div>"]
+    if meta.get("note"):
+        out.append(f'<p class="decision-note">{render_inline(html.escape(meta["note"]))}</p>')
+    out.append('<div class="decision-opts">')
+    for key, text in options:
+        is_rec = key == rec
+        out.append(
+            f'<button type="button" class="decision-opt{" recommended" if is_rec else ""}" '
+            f'data-choice="{html.escape(did + key)}" data-decision="{html.escape(did)}">'
+            f'<span class="opt-key">{key}</span>'
+            f'<span class="opt-text">{render_inline(html.escape(text))}</span>'
+            + ('<span class="opt-rec">권고</span>' if is_rec else "")
+            + "</button>")
+    out.append("</div>")
+    if meta.get("impact"):
+        out.append(f'<p class="decision-impact">영향: '
+                   f'{render_inline(html.escape(meta["impact"]))}</p>')
+    out.append("</div>")
+    return "\n".join(out)
+
+
 def _cells(row: str) -> list[str]:
     row = row.strip()
     if row.startswith("|"):
@@ -80,6 +137,7 @@ def render(md: str, *, heading_offset: int = 0) -> str:
     in_quote = False
     fence_lang: str | None = None
     fence_buf: list[str] = []
+    decision_seq = 0
     i = 0
 
     def close_para() -> None:
@@ -111,8 +169,13 @@ def render(md: str, *, heading_offset: int = 0) -> str:
         # ── 코드 펜스 ──
         if fence_lang is not None:
             if _FENCE.match(stripped):
-                cls = f' class="lang-{html.escape(fence_lang)}"' if fence_lang else ""
-                out.append(f"<pre><code{cls}>" + html.escape("\n".join(fence_buf)) + "</code></pre>")
+                if fence_lang.lower() == "decision":
+                    decision_seq += 1
+                    out.append(_decision_html(fence_buf, decision_seq))
+                else:
+                    cls = f' class="lang-{html.escape(fence_lang)}"' if fence_lang else ""
+                    out.append(f"<pre><code{cls}>"
+                               + html.escape("\n".join(fence_buf)) + "</code></pre>")
                 fence_lang, fence_buf = None, []
             else:
                 fence_buf.append(raw)

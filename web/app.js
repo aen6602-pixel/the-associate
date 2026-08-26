@@ -360,7 +360,57 @@ function renderChat() {
   $('caps').hidden = state.messages.length > 0;
   $('chat').innerHTML = state.messages.map(messageHtml).join('');
   wireExports();
+  wireDecisions();
   scrollToEnd();
+}
+
+/* ── 의사결정 카드: 클릭해서 고르고 한 번에 전송 ────────
+ * 예전엔 답변에 "1A, 2A, 3A 처럼 답해 주세요" 가 있고 사용자가 직접 타이핑해야 했다.
+ * 이제 마지막 assistant 메시지의 카드들을 클릭하면 선택이 모여 그대로 전송된다.
+ */
+function wireDecisions() {
+  const blocks = [...document.querySelectorAll('.msg.assistant')];
+  const last = blocks[blocks.length - 1];
+  if (!last) return;
+  const cards = [...last.querySelectorAll('.decision')];
+  if (!cards.length) return;
+
+  const picked = new Map();   // decision id -> "1A"
+
+  const bar = document.createElement('div');
+  bar.className = 'decision-bar';
+  bar.innerHTML = `<span class="picked" id="picked-str">—</span>
+    <button class="primary" id="send-decisions" disabled>선택 전송</button>
+    <p class="hint">직접 입력하거나 조건을 덧붙이려면 아래 입력창을 쓰세요.</p>`;
+  (last.querySelector('.body') || last).appendChild(bar);
+
+  const refresh = () => {
+    const order = cards.map((c) => c.dataset.decision);
+    const parts = order.filter((id) => picked.has(id)).map((id) => picked.get(id));
+    $('picked-str').textContent = parts.length ? parts.join(', ') : '—';
+    $('send-decisions').disabled = parts.length !== cards.length;
+  };
+
+  last.querySelectorAll('.decision-opt').forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.dataset.decision;
+      const card = btn.closest('.decision');
+      card.querySelectorAll('.decision-opt').forEach((b) => b.classList.remove('selected'));
+      btn.classList.add('selected');
+      picked.set(id, btn.dataset.choice);
+      refresh();
+    };
+  });
+
+  $('send-decisions').onclick = () => {
+    const order = cards.map((c) => c.dataset.decision);
+    const answer = order.filter((id) => picked.has(id)).map((id) => picked.get(id)).join(', ');
+    if (!answer) return;
+    bar.remove();
+    submitQuestion(answer);
+  };
+
+  refresh();
 }
 
 function wireExports() {
@@ -429,9 +479,13 @@ questionBox.addEventListener('keydown', (e) => {
   }
 });
 
-composer.addEventListener('submit', async (e) => {
+composer.addEventListener('submit', (e) => {
   e.preventDefault();
   const question = questionBox.value.trim();
+  if (question) submitQuestion(question);
+});
+
+async function submitQuestion(question) {
   if (!question || state.busy) return;
 
   state.busy = true;
@@ -527,7 +581,7 @@ composer.addEventListener('submit', async (e) => {
     renderEngine();
     questionBox.focus();
   }
-});
+}
 
 /* ── 사이드바 토글 (좁은 화면) ───────────────────────── */
 $('sidebar-toggle').addEventListener('click', () => {

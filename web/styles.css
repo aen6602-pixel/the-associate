@@ -224,16 +224,66 @@ button:disabled { opacity: .5; cursor: default; }
 .spinner { width: 11px; height: 11px; border: 2px solid #3A4455; border-top-color: var(--amber);
            border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; }
 
-.exports { display: flex; flex-wrap: wrap; gap: .4rem; margin: .7rem 0 0; }
+.exports { display: flex; flex-wrap: wrap; gap: .4rem; margin: .9rem 0 0;
+           padding-top: .8rem; border-top: 1px solid var(--line); }
+
+/* ── 의사결정 카드 (```decision) ─────────────────────── */
+.decision { border: 1px solid var(--line); border-left: 2px solid var(--amber);
+            border-radius: var(--radius); background: var(--panel);
+            margin: .9rem 0; padding: .85rem .95rem; }
+.decision-head { display: flex; align-items: baseline; gap: .55rem; }
+.decision-no { flex: 0 0 auto; width: 1.35rem; height: 1.35rem; border-radius: 4px;
+               background: #2A2210; color: var(--amber); border: 1px solid #4A3D18;
+               font-size: .72rem; font-weight: 700; display: flex;
+               align-items: center; justify-content: center; }
+.decision-title { font-weight: 600; font-size: .99rem; }
+.decision-note { color: var(--text-mute); font-size: .84rem; margin: .45rem 0 0;
+                 padding-left: 1.9rem; line-height: 1.55; }
+.decision-impact { color: var(--text-mute); font-size: .82rem; margin: .55rem 0 0;
+                   padding-left: 1.9rem; }
+
+.decision-opts { display: flex; flex-direction: column; gap: .35rem;
+                 margin: .7rem 0 0; padding-left: 1.9rem; }
+.decision-opt { display: flex; align-items: flex-start; gap: .6rem; width: 100%;
+                text-align: left; background: var(--panel-2); color: var(--text-dim);
+                border: 1px solid var(--line); border-radius: 6px;
+                padding: .5rem .65rem; font-size: .89rem; line-height: 1.5; }
+.decision-opt:hover { border-color: #3C4757; color: var(--text); background: #1E2734; }
+.decision-opt .opt-key { flex: 0 0 auto; width: 1.15rem; height: 1.15rem; border-radius: 3px;
+                         background: #232C3B; color: var(--text-mute); font-size: .7rem;
+                         font-weight: 700; display: flex; align-items: center;
+                         justify-content: center; margin-top: .12rem; }
+.decision-opt .opt-text { flex: 1; }
+.decision-opt .opt-rec { flex: 0 0 auto; font-size: .68rem; letter-spacing: .08em;
+                         color: var(--amber); border: 1px solid #4A3D18; background: #241E10;
+                         border-radius: 3px; padding: .05rem .3rem; margin-top: .15rem; }
+.decision-opt.recommended { border-color: #4A3D18; }
+.decision-opt.selected { border-color: var(--amber); background: #211C0E; color: var(--text); }
+.decision-opt.selected .opt-key { background: var(--amber); color: #1A1206; }
+
+/* 카드들 아래 붙는 전송 바 */
+.decision-bar { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+                margin: .9rem 0 0; padding: .7rem .8rem; border: 1px dashed var(--line);
+                border-radius: var(--radius); background: #10161F; }
+.decision-bar .picked { font-family: var(--mono); font-size: .86rem; color: var(--amber); }
+.decision-bar .hint { margin: 0; }
 
 /* ── 답변 마크다운 ──────────────────────────────────── */
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
 .md p { margin: .6rem 0; }
-.md h3, .md h4, .md h5, .md h6 { margin: 1.2rem 0 .5rem; line-height: 1.35; }
-.md h3 { font-size: 1.15rem; } .md h4 { font-size: 1.03rem; } .md h5 { font-size: .95rem; }
-.md ul, .md ol { margin: .6rem 0; padding-left: 1.4rem; }
-.md li { margin: .2rem 0; }
+.md h1, .md h2 { font-size: 1.2rem; font-weight: 600; margin: 1.5rem 0 .6rem;
+                 padding-bottom: .4rem; border-bottom: 1px solid var(--line); }
+.md h3, .md h4, .md h5, .md h6 { margin: 1.3rem 0 .45rem; line-height: 1.35; }
+/* 섹션 제목은 앰버 힌트를 줘서 본문과 구분되게 (IB 리포트 느낌) */
+.md h3 { font-size: .78rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+         color: var(--amber); }
+.md h4 { font-size: 1rem; color: var(--text); }
+.md h5 { font-size: .93rem; color: var(--text-dim); }
+.md strong { color: #F2F4F7; font-weight: 650; }
+.md ul, .md ol { margin: .6rem 0; padding-left: 1.35rem; }
+.md li { margin: .28rem 0; }
+.md li::marker { color: var(--text-mute); }
 .md code { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
            padding: .05rem .3rem; font-family: var(--mono); font-size: .88em; }
 .md pre { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
