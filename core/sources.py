@@ -58,6 +58,15 @@ SOURCES: list[dict] = [
         "note": "사내망이 KRX(data.krx) 직접 접근을 막아 네이버 경유로 우회.",
     },
     {
+        "name": "Yahoo Finance", "org": "Yahoo (해외 거래소 시세 집계)", "tier": "reference",
+        "key_attr": None, "wired": True,
+        "provides": "미국·일본·대만·홍콩 주가/지수 시계열(일·주·월봉)",
+        "used_by": "해외 기업 베타 회귀(get_beta) · WACC",
+        "url": "https://finance.yahoo.com",
+        "note": "키 불필요(공개 chart 엔드포인트). 시가총액은 crumb 인증이 필요해 미제공 — "
+                "해외 목표 부채비중은 Damodaran 산업평균을 쓴다. 비공식 API 라 참조 등급.",
+    },
+    {
         "name": "SEC EDGAR", "org": "美 증권거래위원회", "tier": "authoritative",
         "key_attr": None, "wired": True,
         "provides": "미국 상장사 공시·재무제표(10-K XBRL)·발행주식수",

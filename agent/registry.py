@@ -248,12 +248,14 @@ def _industry_benchmarks(industry: str, country: str = "KR") -> Value:
 def _wacc_auto(company: str, country: str = "KR", industry: str | None = None,
                beta_override: float | None = None, cost_of_debt_pct: float | None = None,
                debt_to_value: float | None = None,
-               debt_ratio_source: str = "auto") -> Value:
+               debt_ratio_source: str = "auto", market: str | None = None,
+               symbol: str | None = None, risk_free_pct: float | None = None) -> Value:
     # 0 은 "지정 안 함" 으로 본다 — β=0·Kd=0·D/(D+E)=0 은 의미 없는 입력이고, 그대로 통과시키면
     # Rf 와 같은 WACC 가 조용히 나온다(실측: LLM 이 beta_override=0 을 넘겨 WACC 4.32% 산출).
     return wacc_engine.compute_wacc_auto(
         company, country, _blank(industry), "10Y", _pos(beta_override),
-        _pos(cost_of_debt_pct), _pos(debt_to_value), _blank(debt_ratio_source) or "auto")
+        _pos(cost_of_debt_pct), _pos(debt_to_value), _blank(debt_ratio_source) or "auto",
+        _blank(market), _blank(symbol), _pos(risk_free_pct))
 
 
 _COUNTRY_PROP = {
@@ -913,20 +915,35 @@ REGISTRY: dict[str, dict] = {
         "schema": {
             "name": "compute_wacc_auto",
             "description": (
-                "WACC 를 공시·시세에서 자동으로 구성한다 — β(회귀 또는 산업), Kd(공시 이자비용÷"
-                "차입금), D/(D+E)(차입금÷(차입금+시가총액)), Rf(ECOS/FRED), ERP·세율(Damodaran)을 "
-                "각각 도출해 조합한다. 어느 경로를 썼는지 note 에 전부 남는다. "
+                "WACC 를 공시·시세에서 자동으로 구성한다 — β, Kd, D/(D+E), Rf, ERP·세율을 각각 "
+                "도출해 조합하고 어느 경로를 썼는지 note 에 전부 남긴다. "
                 "**WACC 3대 입력(베타·타인자본비용·부채비중)을 사용자에게 묻기 전에 이 도구를 "
-                "먼저 쓸 것.** 특정 입력만 사용자가 지정하고 싶으면 해당 인자만 넘기면 된다."
+                "먼저 쓸 것.** 특정 입력만 지정하려면 해당 인자만 넘긴다.\n"
+                "⚠️ **한국 기업이 아니면 country·market·industry 를 반드시 함께 지정한다.** "
+                "DART 공시는 한국 전용이라 해외 기업의 Kd·부채비중은 Damodaran 산업평균으로만 "
+                "낼 수 있고, 베타도 Yahoo 티커(symbol)가 있어야 회귀할 수 있다. 지정하지 않으면 "
+                "'DART 에서 기업을 못 찾음' 오류가 난다."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "company": {"type": "string", "description": "회사명."},
-                    "country": {"type": "string", "description": "국가 코드. 기본 KR."},
+                    "country": {"type": "string",
+                                "description": "국가 코드 KR/US/JP/TW. 기본 KR. ERP·세율·Rf 선택에 쓴다."},
+                    "market": {"type": "string",
+                               "description": "상장 시장: KR(네이버·KOSPI) | US | JP | TW | HK. "
+                                              "생략하면 country 를 따른다. 해외면 반드시 지정."},
+                    "symbol": {"type": "string",
+                               "description": "해외 종목의 Yahoo 티커(예: AAPL, 7203.T, 2330.TW). "
+                                              "없으면 산업베타로 대체된다."},
                     "industry": {"type": "string",
-                                 "description": "Damodaran 산업명. 비상장사나 시가총액이 없는 "
-                                                "경우의 대체 경로로 쓰인다."},
+                                 "description": "Damodaran 산업명(예: Apparel, Semiconductor). "
+                                                "해외 기업과 비상장사에는 사실상 필수."},
+                    "risk_free_pct": {
+                        "type": "number",
+                        "description": "무위험수익률 %를 직접 지정. Rf 조회는 KR·US 만 지원하므로 "
+                                       "일본·대만 등은 해당 통화 국채수익률을 여기에 넣는다.",
+                    },
                     "beta_override": {"type": "number", "description": "베타를 직접 지정."},
                     "cost_of_debt_pct": {"type": "number",
                                          "description": "세전 타인자본비용 %를 직접 지정."},
@@ -934,7 +951,7 @@ REGISTRY: dict[str, dict] = {
                                       "description": "목표 부채비중 D/(D+E), 0~1 을 직접 지정."},
                     "debt_ratio_source": {
                         "type": "string",
-                        "description": "부채비중 산출 경로: auto(시장가치 우선) | industry(산업평균).",
+                        "description": "부채비중 산출 경로: auto(국내는 시장가치 우선) | industry(산업평균).",
                     },
                 },
                 "required": ["company"],

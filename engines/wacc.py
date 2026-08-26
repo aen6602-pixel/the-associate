@@ -23,15 +23,26 @@ def _rf(country: str, tenor: str) -> Value:
 
 
 def compute_wacc(country: str, beta: float, cost_of_debt_pct: float,
-                 debt_to_value: float, tenor: str = "10Y") -> Value:
-    """WACC 계산. beta/cost_of_debt_pct/debt_to_value 는 사용자가 제시하는 가정."""
+                 debt_to_value: float, tenor: str = "10Y",
+                 risk_free_pct: float | None = None) -> Value:
+    """WACC 계산. beta/cost_of_debt_pct/debt_to_value 는 사용자가 제시하는 가정.
+
+    risk_free_pct 를 주면 국채 조회를 건너뛴다 — Rf provider 가 없는 국가(일본·대만 등)에서
+    해당 통화 국채수익률을 직접 넣기 위한 통로다."""
     beta = float(beta)
     kd = float(cost_of_debt_pct)
     dv = float(debt_to_value)
     if not 0 <= dv <= 1:
         raise DataError("debt_to_value 는 0~1 사이여야 함 (예: 부채비중 30% → 0.3)")
 
-    rf = _rf(country, tenor)
+    if risk_free_pct is not None:
+        rf = Value(float(risk_free_pct), "%", label=f"무위험수익률 ({country.upper()}, 직접 지정)",
+                   provenance=Provenance(source="사용자 가정(입력)",
+                                         source_type=SourceType.ASSUMPTION,
+                                         source_url="(assumption)",
+                                         note="Rf provider 가 없는 국가라 직접 지정된 값"))
+    else:
+        rf = _rf(country, tenor)
     erp = damodaran.equity_risk_premium(country)
     tax = damodaran.corporate_tax_rate(country)
 
@@ -39,8 +50,9 @@ def compute_wacc(country: str, beta: float, cost_of_debt_pct: float,
     kd_after = kd * (1 - tax.value / 100)
     wacc = (1 - dv) * ke + dv * kd_after
 
+    rf_src = rf.provenance.source + (f", {rf.provenance.as_of}" if rf.provenance.as_of else "")
     note = (
-        f"Ke {ke:.2f}% = Rf {rf.value}%({rf.provenance.source}, {rf.provenance.as_of}) "
+        f"Ke {ke:.2f}% = Rf {rf.value}%({rf_src}) "
         f"+ β {beta} × ERP {erp.value}%(Damodaran); "
         f"Kd(세후) {kd_after:.2f}% = {kd}% × (1 − 세율 {tax.value}%, Damodaran); "
         f"WACC = {(1-dv)*100:.0f}%×Ke + {dv*100:.0f}%×Kd(세후)."
@@ -98,27 +110,44 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
                       tenor: str = "10Y", beta_override: float | None = None,
                       cost_of_debt_pct: float | None = None,
                       debt_to_value: float | None = None,
-                      debt_ratio_source: str = "auto") -> Value:
+                      debt_ratio_source: str = "auto",
+                      market: str | None = None, symbol: str | None = None,
+                      risk_free_pct: float | None = None) -> Value:
     """WACC 를 공시·시세에서 **자동으로** 구성한다.
 
-    · β  : 상장사는 5년 주봉 회귀베타(네이버 시세), 비상장이면 industry 인자로 산업베타 재레버리지
-    · Kd : 현금흐름표 이자비용 ÷ 이자발생부채 (손익 '금융비용' 은 환차손 포함이라 쓰지 않음)
-    · D/(D+E) : IBD ÷ (IBD + 시가총액). 비상장이거나 debt_ratio_source='industry' 면 산업평균
-    · Rf·ERP·세율 : ECOS/FRED + Damodaran
+    한국(market='KR')과 해외는 쓸 수 있는 소스가 다르다:
+      · β  — KR: 네이버(KRX) 5년 주봉 회귀 / 해외: Yahoo + 해당시장 지수(symbol 필요)
+             비상장이거나 회귀 불가면 industry 로 Damodaran 산업베타 재레버리지
+      · Kd — KR: 현금흐름표 이자비용 ÷ 이자발생부채(DART)
+             해외: DART 가 없으므로 **Damodaran 산업평균 Kd**(industry 필요)
+      · D/(D+E) — KR: IBD ÷ (IBD + 시가총액) / 해외: 산업평균(시가총액 소스 없음)
+      · Rf·ERP·세율 — ECOS(KR)/FRED(US) + Damodaran. Rf provider 가 없는 국가(JP·TW 등)는
+        risk_free_pct 로 직접 넣는다.
 
-    각 인자를 직접 주면 그 값이 우선한다(자동 도출을 건너뛴다). 어느 경로를 썼는지는 note 에
-    전부 남는다 — 자동이라도 추적 가능해야 하므로."""
+    각 인자를 직접 주면 그 값이 우선한다. 어느 경로를 썼는지는 note 에 전부 남는다."""
     from engines import beta as beta_engine, dcf_inputs
 
     c = (country or "KR").strip().upper()
+    mkt = (market or c).strip().upper()
+    domestic = mkt == "KR"
+    region = damodaran.region_for(c)
     steps: list[str] = []
+
+    def _industry_or_fail(what: str) -> dict:
+        if not industry:
+            raise DataError(
+                f"{company}({mkt}) 의 {what} 는 공시에서 자동으로 뽑을 수 없습니다 — DART 공시는 "
+                f"한국 기업 전용입니다. Damodaran 산업평균을 쓰려면 industry 를 지정하세요"
+                f"(예: Apparel, Semiconductor). 또는 값을 직접 넘기세요.")
+        return damodaran.industry_wacc(industry, region)
 
     # 1) 베타
     if beta_override is not None:
         beta_v, beta = None, float(beta_override)
         steps.append(f"β {beta} (직접 지정)")
     else:
-        beta_v = beta_engine.beta_for(company, industry=industry, country=c)
+        beta_v = beta_engine.beta_for(company, industry=industry, country=c,
+                                      market=mkt, symbol=symbol)
         beta = beta_v.value
         steps.append(f"β {beta} ({beta_v.provenance.source})")
 
@@ -126,7 +155,7 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
     if cost_of_debt_pct is not None:
         kd_v, kd = None, float(cost_of_debt_pct)
         steps.append(f"Kd {kd}% (직접 지정)")
-    else:
+    elif domestic:
         kd_v = dcf_inputs.cost_of_debt(company)
         kd = kd_v.value
         if not 0.3 <= kd <= 15:
@@ -134,17 +163,19 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
                 f"공시에서 계산한 Kd {kd}% 가 통상 범위(0.3~15%)를 벗어납니다 "
                 f"({kd_v.provenance.note}). cost_of_debt_pct 를 직접 지정하거나 산업평균을 쓰세요.")
         steps.append(f"Kd {kd}% (공시 이자비용÷IBD)")
+    else:
+        kd_v = _industry_or_fail("타인자본비용")["cost_of_debt"]
+        kd = kd_v.value
+        steps.append(f"Kd {kd}% (Damodaran {region} 산업평균)")
 
     # 3) 목표 부채비중
     if debt_to_value is not None:
         dv_v, dv = None, float(debt_to_value)
         steps.append(f"D/(D+E) {dv:.4f} (직접 지정)")
-    elif debt_ratio_source == "industry":
-        if not industry:
-            raise DataError("debt_ratio_source='industry' 면 industry 를 지정해야 합니다.")
-        dv_v = damodaran.industry_metrics(industry, damodaran.region_for(c))["debt_to_value"]
+    elif debt_ratio_source == "industry" or not domestic:
+        dv_v = _industry_or_fail("목표 부채비중")["debt_to_value"]
         dv = dv_v.value
-        steps.append(f"D/(D+E) {dv:.4f} (산업평균)")
+        steps.append(f"D/(D+E) {dv:.4f} ({region} 산업평균)")
     else:
         try:
             dv_v = market_debt_to_value(company)
@@ -153,11 +184,11 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
         except DataError as e:
             if not industry:
                 raise DataError(f"{e}") from e
-            dv_v = damodaran.industry_metrics(industry, damodaran.region_for(c))["debt_to_value"]
+            dv_v = damodaran.industry_wacc(industry, region)["debt_to_value"]
             dv = dv_v.value
             steps.append(f"D/(D+E) {dv:.4f} (시가총액 없음 → 산업평균)")
 
-    base = compute_wacc(c, beta, kd, dv, tenor)
+    base = compute_wacc(c, beta, kd, dv, tenor, risk_free_pct)
     extras = {"beta": beta_v, "cost_of_debt": kd_v, "debt_to_value": dv_v}
     return Value(
         base.value, "%", label=f"{company} WACC (자동)",

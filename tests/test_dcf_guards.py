@@ -103,8 +103,10 @@ def test_wacc_auto_ignores_zero_beta_override(monkeypatch):
     """β=0 을 그대로 쓰면 WACC 가 Rf 와 같아져 조용히 틀린다 → 자동 도출로 넘어가야 한다."""
     seen = {}
 
-    def fake(company, country, industry, tenor, beta_override, kd, dv, src):
-        seen.update(beta_override=beta_override, industry=industry, kd=kd, dv=dv, src=src)
+    def fake(company, country, industry, tenor, beta_override, kd, dv, src,
+             market=None, symbol=None, risk_free_pct=None):
+        seen.update(beta_override=beta_override, industry=industry, kd=kd, dv=dv, src=src,
+                    market=market, symbol=symbol, risk_free_pct=risk_free_pct)
         return Value(9.0, "%", label="wacc",
                      provenance=Provenance(source="계산엔진", source_type=SourceType.COMPUTED,
                                            source_url="(computed)"))
@@ -113,11 +115,15 @@ def test_wacc_auto_ignores_zero_beta_override(monkeypatch):
 
     monkeypatch.setattr(wacc_engine, "compute_wacc_auto", fake)
     registry._wacc_auto("삼성전자", "KR", industry="", beta_override=0,
-                        cost_of_debt_pct=0, debt_to_value=0, debt_ratio_source="")
+                        cost_of_debt_pct=0, debt_to_value=0, debt_ratio_source="",
+                        market="", symbol="", risk_free_pct=0)
     assert seen["beta_override"] is None
     assert seen["industry"] is None
     assert seen["kd"] is None and seen["dv"] is None
     assert seen["src"] == "auto"
+    # 시장·티커·Rf 도 같은 정규화를 받아야 한다 — 빈 문자열이 그대로 가면 라우팅이 깨진다.
+    assert seen["market"] is None and seen["symbol"] is None
+    assert seen["risk_free_pct"] is None
 
 
 def test_year_zero_is_dropped_before_hitting_dart(monkeypatch):

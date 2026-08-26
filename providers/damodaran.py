@@ -140,15 +140,27 @@ _INDUSTRY_FILES = {
 _REGION_BY_COUNTRY = {"KR": "emerging", "TW": "emerging", "US": "us", "JP": "global"}
 
 
-def _industry_frame(region: str) -> tuple[pd.DataFrame, str, str]:
-    fname = _INDUSTRY_FILES.get(region)
+# 산업별 자본비용(WACC) 데이터셋 — 'Industry Averages' 시트, 헤더 18행 (실측 2026-08).
+# 컬럼: Industry Name | Number of Firms | Beta | Cost of Equity | E/(D+E) | Std Dev in Stock |
+#       Cost of Debt | Tax Rate | After-tax Cost of Debt | D/(D+E) | Cost of Capital | ...
+# 해외 기업은 공시에서 Kd 를 뽑을 수 없으므로(DART 는 한국 전용) 이 산업평균을 쓴다.
+_WACC_FILES = {
+    "emerging": "waccemerg.xls",
+    "global": "waccGlobal.xls",
+    "us": "wacc.xls",
+}
+
+
+def _industry_frame(region: str, kind: str = "beta") -> tuple[pd.DataFrame, str, str]:
+    files = _INDUSTRY_FILES if kind == "beta" else _WACC_FILES
+    fname = files.get(region)
     if fname is None:
-        raise DataError(f"지원하지 않는 지역: {region} (지원: {', '.join(_INDUSTRY_FILES)})")
+        raise DataError(f"지원하지 않는 지역: {region} (지원: {', '.join(files)})")
     url = f"https://pages.stern.nyu.edu/~adamodar/pc/datasets/{fname}"
     raw = get_bytes(url, ttl_hours=24 * 30)
     xls = pd.ExcelFile(io.BytesIO(raw))
     sheet = next((s for s in xls.sheet_names if "industry" in s.lower()), xls.sheet_names[0])
-    probe = xls.parse(sheet, header=None, nrows=20)
+    probe = xls.parse(sheet, header=None, nrows=25)
     hdr = None
     for i in range(len(probe)):
         cells = [str(c) for c in probe.iloc[i].tolist()]
@@ -241,6 +253,65 @@ def industry_metrics(industry: str, region: str = "emerging") -> dict:
     out["industry_name"] = Value(
         0, "", label=name,
         provenance=_prov("Industry Name", f"매칭된 Damodaran 산업명: {name}"))
+    return out
+
+
+def industry_wacc(industry: str, region: str = "emerging") -> dict:
+    """산업별 자본비용 구성요소 — {cost_of_debt, debt_to_value, levered_beta, tax_rate} (Value).
+
+    해외 기업은 DART 공시가 없어 이자비용÷차입금으로 Kd 를 만들 수 없다. 그때 이 산업평균
+    Kd 와 목표 부채비중을 쓴다(등급 reference — 그 회사 실제 값이 아니라 산업 평균이다)."""
+    df, url, as_of = _industry_frame(region, kind="wacc")
+    names = df["Industry Name"].astype(str)
+    q = _norm(industry)
+    exact = df[names.map(_norm) == q]
+    hit = exact if len(exact) else df[names.map(lambda s: q in _norm(s))]
+    if not len(hit):
+        import difflib
+
+        close = difflib.get_close_matches(industry, names.tolist(), n=5, cutoff=0.4)
+        raise DataError(
+            f"Damodaran 산업 '{industry}' 를 {region} 자본비용 데이터셋에서 찾지 못했습니다. "
+            + (f"비슷한 이름: {', '.join(close)}" if close else ""))
+    row = hit.iloc[0]
+    name = str(row["Industry Name"]).strip()
+
+    def _num(col: str) -> float | None:
+        try:
+            v = float(row[col])
+        except (TypeError, ValueError, KeyError):
+            return None
+        return None if v != v else v
+
+    def _prov(field: str, note: str) -> Provenance:
+        return Provenance(source=f"Damodaran ({_WACC_FILES[region]})",
+                          source_type=SourceType.REFERENCE, source_url=url,
+                          original_field=field, as_of=as_of, note=note)
+
+    n_firms = _num("Number of Firms")
+    tag = f"표본 {int(n_firms) if n_firms else '?'}개사, {region} 산업평균"
+    out: dict[str, Value] = {}
+    kd = _num("Cost of Debt")
+    if kd is not None:
+        out["cost_of_debt"] = Value(
+            round(kd * 100, 2), "%", label=f"{name} 산업 세전 타인자본비용 ({region})",
+            provenance=_prov("Cost of Debt", f"{tag}. 회사 고유값이 아니라 산업 평균이다."))
+    dv = _num("D/(D+E)")
+    if dv is not None:
+        out["debt_to_value"] = Value(
+            round(dv, 4), "비율", label=f"{name} 산업 목표부채비중 D/(D+E) ({region})",
+            provenance=_prov("D/(D+E)", f"{tag}. 시장가치 기준."))
+    b = _num("Beta")
+    if b is not None:
+        out["levered_beta"] = Value(round(b, 4), "배",
+                                    label=f"{name} 산업 레버드베타 ({region})",
+                                    provenance=_prov("Beta", tag))
+    t = _num("Tax Rate")
+    if t is not None:
+        out["tax_rate"] = Value(round(t * 100, 2), "%", label=f"{name} 산업 실효세율 ({region})",
+                                provenance=_prov("Tax Rate", tag))
+    out["industry_name"] = Value(0, "", label=name,
+                                 provenance=_prov("Industry Name", f"매칭된 산업명: {name}"))
     return out
 
 

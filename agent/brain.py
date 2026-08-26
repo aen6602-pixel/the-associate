@@ -104,9 +104,14 @@ tool 쌍으로 찾는다:
   `get_cost_of_debt` 를 그대로 부른다. 다만 회귀베타는 불가하니 `get_beta`/`compute_wacc_auto` 에
   `industry`(Damodaran 산업명)를 함께 넘긴다. 감사보고서에 없는 항목은 명확한 오류로 돌아오니
   그 항목만 가정으로 처리한다.
-- **해외 상장사**: `get_beta` 에 `market`(US/JP/TW/HK)과 `symbol`(Yahoo 티커: AAPL, 7203.T,
-  2330.TW)을 함께 넘긴다 — 안 주면 국내 지수(KOSPI)와 회귀돼 엉뚱한 베타가 나온다.
-  재무는 get_financial_item_us/jp/tw 를 쓴다.
+- **해외 기업(중요)**: DART·네이버는 **한국 전용**이다. 해외 기업에 `compute_wacc_auto` 나
+  `get_beta` 를 부를 때는 반드시 `country`·`market`(US/JP/TW/HK)·`symbol`(Yahoo 티커: AAPL,
+  7203.T, 2330.TW)·`industry`(Damodaran 산업명)를 **함께** 넘긴다. 안 넘기면
+  "DART 에서 기업을 못 찾음" 이 나거나 KOSPI 와 회귀돼 엉뚱한 베타가 나온다.
+  해외는 Kd·목표부채비중을 공시에서 못 뽑으므로 Damodaran 산업평균이 쓰이며, 그 사실이
+  결과 note 에 남으니 답변에도 "회사 고유값이 아니라 산업평균" 이라고 밝힌다.
+  일본·대만은 무위험수익률 provider 가 없어 `risk_free_pct` 로 해당 통화 국채수익률을 넣어야
+  한다(모르면 사용자에게 그 값만 묻는다). 재무는 get_financial_item_us/jp/tw 를 쓴다.
 
 ## 답변 방식
 - 한국어로 답한다. 간결하게, 핵심 숫자 먼저.
