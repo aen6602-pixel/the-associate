@@ -57,6 +57,31 @@ def is_configured() -> bool:
     return bool(users())
 
 
+def user_key_for(name: str) -> str:
+    """이름 → 대화기록 폴더 키. `authenticate()` 가 만드는 키와 반드시 같아야 한다
+    (관리자 페이지가 이름으로 남의 세션 폴더를 찾을 때 쓴다)."""
+    label = (name or "").strip().lower() or "member"
+    return _hash(f"pw:{label}")
+
+
+def admins() -> set[str]:
+    """관리자 이름 집합. `ADMIN_USERS` 로 지정하고, 없으면 `APP_USERS` 의 **첫 번째** 계정.
+
+    공용 비밀번호(APP_PASSWORD)만 쓰는 설정은 사용자를 구분할 수 없으므로 관리자도 없다."""
+    raw = os.getenv("ADMIN_USERS", "")
+    names = {n.strip().lower() for n in raw.replace(";", ",").split(",") if n.strip()}
+    if names:
+        return names
+    table = users()
+    if not table or list(table) == [""]:
+        return set()
+    return {next(iter(table))}
+
+
+def is_admin(v: Viewer) -> bool:
+    return bool(v) and v.label.strip().lower() in admins()
+
+
 def needs_name() -> bool:
     """로그인 화면에 이름 칸을 보여줄지 (공용 비밀번호 1개면 불필요)."""
     return list(users()) != [""]

@@ -111,6 +111,7 @@ async function enterApp() {
 
   $('viewer-row').hidden = !data.gate;
   $('viewer-label').textContent = `👤 ${data.viewer.label}`;
+  $('admin-link').hidden = !data.viewer.is_admin;
   $('ephemeral-warn').hidden = !(data.deploy_mode && !data.persistent_storage);
 
   state.engines = data.engines;

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>The Associate — Admin</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230A0E17'/><text y='23' x='6' font-size='20' fill='%23F0B429' font-family='sans-serif' font-weight='600'>A</text></svg>">
+</head>
+<body>
+
+<div class="admin-wrap">
+  <header class="admin-head">
+    <div>
+      <div class="admin-title">THE ASSOCIATE <span class="admin-tag">ADMIN</span></div>
+      <p class="hint" id="admin-sub">사용현황을 불러오는 중…</p>
+    </div>
+    <div class="admin-actions">
+      <button class="ghost sm" id="refresh-btn">↻ 새로고침</button>
+      <a class="ghost sm" href="/">← 앱으로</a>
+    </div>
+  </header>
+
+  <p class="warn box" id="admin-error" hidden></p>
+
+  <div id="admin-body" hidden>
+    <section class="tiles" id="totals"></section>
+
+    <section>
+      <h2 class="admin-h2">사용자</h2>
+      <div class="table-wrap"><table class="admin-table" id="users-table"></table></div>
+    </section>
+
+    <section>
+      <h2 class="admin-h2">최근 질문</h2>
+      <p class="hint">클릭하면 그 대화 전체를 볼 수 있습니다.</p>
+      <div class="table-wrap"><table class="admin-table" id="timeline-table"></table></div>
+    </section>
+
+    <section>
+      <h2 class="admin-h2">데이터 소스 사용 순위</h2>
+      <div class="table-wrap"><table class="admin-table" id="tools-table"></table></div>
+    </section>
+
+    <p class="hint admin-foot">
+      이 화면은 관리자(<span id="admin-names"></span>)만 볼 수 있습니다.
+      팀원의 질문과 답변 원문이 표시되므로, 조회 가능하다는 사실을 팀원에게 미리 알려두세요.
+    </p>
+  </div>
+</div>
+
+<!-- 대화 열람 모달 -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title" id="modal-title"></div>
+        <div class="hint" id="modal-meta"></div>
+      </div>
+      <button class="ghost sm" id="modal-close">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script src="/static/admin.js"></script>
+</body>
+</html>

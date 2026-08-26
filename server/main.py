@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent import brain
-from core import auth, config, history as hist, markdown, paths, sources
+from core import admin, auth, config, history as hist, markdown, paths, sources
 
 log = logging.getLogger("associate")
 
@@ -122,7 +122,8 @@ def me(request: Request) -> dict:
                             "APP_PASSWORD 를 설정해야 합니다.") if blocked else None}
     v = auth.parse_token(request.cookies.get(auth.COOKIE_NAME))
     return {"authenticated": v is not None, "gate": True, "blocked": False,
-            "label": v.label if v else None, "needs_name": auth.needs_name(), "message": None}
+            "label": v.label if v else None, "needs_name": auth.needs_name(), "message": None,
+            "is_admin": auth.is_admin(v) if v else False}
 
 
 # ── 부트스트랩 (사이드바에 필요한 모든 정적 정보) ──────────────────
@@ -149,7 +150,7 @@ def bootstrap(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
         }
 
     return {
-        "viewer": {"label": viewer.label},
+        "viewer": {"label": viewer.label, "is_admin": auth.is_admin(viewer)},
         "gate": auth.is_configured(),
         "deploy_mode": config.DEPLOY_MODE,
         "persistent_storage": paths.IS_PERSISTENT,
@@ -320,6 +321,41 @@ def export(sid: str, body: ExportBody,
         raise HTTPException(status_code=400, detail=f"생성 실패: {e}") from e
 
     raise HTTPException(status_code=400, detail=f"알 수 없는 내보내기 종류: {body.kind}")
+
+
+# ── 관리자 (지정된 계정만) ────────────────────────────────────────
+def require_admin(request: Request) -> auth.Viewer:
+    """관리자 전용. 로그인만으로는 부족하고 ADMIN_USERS 에 속해야 한다."""
+    viewer = current_viewer(request)
+    if not auth.is_admin(viewer):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="관리자만 접근할 수 있습니다.")
+    return viewer
+
+
+@app.get("/api/admin/overview")
+def admin_overview(viewer: auth.Viewer = Depends(require_admin)) -> dict:
+    data = admin.overview()
+    data["viewer"] = {"label": viewer.label}
+    data["admins"] = sorted(auth.admins())
+    return data
+
+
+@app.get("/api/admin/sessions/{name}/{sid}")
+def admin_session(name: str, sid: str,
+                  viewer: auth.Viewer = Depends(require_admin)) -> dict:
+    rec = admin.user_session(name, sid)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="대화를 찾을 수 없습니다.")
+    return {"user": name, "id": rec.get("id"), "title": rec.get("title"),
+            "created_at": rec.get("created_at"), "updated_at": rec.get("updated_at"),
+            "messages": _with_html(rec.get("messages", []))}
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page() -> FileResponse:
+    # 인증은 페이지가 아니라 API 에서 건다 — 화면은 껍데기고 데이터는 전부 API 로 온다.
+    return FileResponse(WEB_DIR / "admin.html")
 
 
 # ── 헬스체크 & 정적 파일 ─────────────────────────────────────────
