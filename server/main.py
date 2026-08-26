@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
@@ -286,6 +287,33 @@ _XLSX_EXPORTS = {
 }
 
 
+# 도구 인자명 → 워크북 생성기 인자명. 이름이 갈린 것을 여기서 흡수한다
+# (compute_dcf 는 revenue_growth_pct, dcf_workbook 은 revenue_growth 를 쓴다).
+_BUILDER_ALIASES = {"revenue_growth_pct": "revenue_growth"}
+
+
+def _adapt_to_builder(builder, tool_input: dict) -> tuple[dict, list[str]]:
+    """도구 입력을 생성기 시그니처에 맞춘다 → (kwargs, 버린 인자 목록).
+
+    도구와 워크북은 각각 진화해서 인자가 어긋난다(실측: compute_dcf 에 market 을 추가한 뒤
+    dcf_full_workbook 이 `unexpected keyword argument 'market'` 로 죽어 엑셀 다운로드가
+    깨져 있었다). `**input` 을 그대로 넘기지 않고 받아주는 것만 골라 넘긴다."""
+    params = inspect.signature(builder).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(tool_input or {}), []   # **kwargs 를 받는 생성기는 무엇이든 받는다
+    kwargs: dict = {}
+    dropped: list[str] = []
+    for k, v in (tool_input or {}).items():
+        alias = _BUILDER_ALIASES.get(k)
+        if k in params:
+            kwargs[k] = v
+        elif alias and alias in params:
+            kwargs[alias] = v
+        else:
+            dropped.append(k)
+    return kwargs, dropped
+
+
 class ExportBody(BaseModel):
     index: int = Field(ge=0)          # 세션 messages 안의 assistant 메시지 위치
     kind: str                         # _XLSX_EXPORTS 의 키 또는 "html_report"
@@ -320,7 +348,16 @@ def export(sid: str, body: ExportBody,
                 raise HTTPException(status_code=400, detail=missing)
             from excel import exporters
 
-            data, fname = getattr(exporters, builder_name)(**call["input"])
+            builder = getattr(exporters, builder_name)
+            kwargs, dropped = _adapt_to_builder(builder, call["input"])
+            # 생성기가 market 을 못 받는데 국내가 아니면, 조용히 한국 모델을 만들어선 안 된다.
+            mkt = str((call["input"] or {}).get("market") or "KR").upper()
+            if "market" in dropped and mkt != "KR":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{body.kind}' 엑셀은 한국(DART) 기업만 지원합니다 "
+                           f"(이 계산의 시장: {mkt}). HTML 리포트를 사용하세요.")
+            data, fname = builder(**kwargs)
             return _attachment(data, fname, XLSX_MIME)
 
         if body.kind == "html_report":

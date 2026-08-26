@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import urllib.parse
 
 import pytest
@@ -14,7 +15,8 @@ from fastapi.testclient import TestClient
 
 from core import auth, history as hist
 from excel import exporters
-from server.main import XLSX_MIME, app
+from server.main import (_BUILDER_ALIASES, _XLSX_EXPORTS, XLSX_MIME,
+                         _adapt_to_builder, app)
 
 DCF_INPUT = {"company": "오리온", "wacc_pct": 8.0, "net_debt": -275874909483,
              "revenue_growth_pct": 9.32, "ebit_margin_pct": 16.65, "da_pct": 5.31,
@@ -30,24 +32,33 @@ def gated(monkeypatch):
 
 @pytest.fixture
 def stub_builders(monkeypatch):
-    """생성 함수를 가로채 (호출된 이름, 넘어온 kwargs) 를 기록한다."""
-    seen = {}
+    """생성 함수를 가로채 (호출된 이름, 넘어온 kwargs) 를 기록한다.
+
+    스텁에 **실제 생성기의 시그니처를 복사**해 붙인다 — `**kwargs` 스텁을 쓰면 서버의
+    인자 어댑터가 무엇을 걸러내는지 검증할 수 없고, 이번에 엑셀이 깨진 원인이 바로 그
+    이음매였다."""
+    seen: dict = {}
+    real_sigs = {n: inspect.signature(getattr(exporters, n)) for n in (
+        "dcf_full_workbook", "dcf_workbook", "comps_workbook", "sangjeung_workbook")}
 
     def make(name, fname):
-        def builder(**kwargs):
+        def builder(*args, **kwargs):
             seen["builder"] = name
             seen["kwargs"] = kwargs
             return b"PK\x03\x04fake-xlsx", fname
+        builder.__signature__ = real_sigs[name]
         return builder
 
-    monkeypatch.setattr(exporters, "dcf_full_workbook",
-                        make("dcf_full_workbook", "DCF_전체모델_오리온_FY2025.xlsx"))
-    monkeypatch.setattr(exporters, "dcf_workbook",
-                        make("dcf_workbook", "DCF_오리온_FY2025.xlsx"))
-    monkeypatch.setattr(exporters, "comps_workbook",
-                        make("comps_workbook", "Comps_SK하이닉스_FY2025.xlsx"))
-    monkeypatch.setattr(exporters, "sangjeung_workbook",
-                        make("sangjeung_workbook", "상증법_에스케이트리켐_FY2025.xlsx"))
+    for name, fname in (
+        ("dcf_full_workbook", "DCF_전체모델_오리온_FY2025.xlsx"),
+        ("dcf_workbook", "DCF_오리온_FY2025.xlsx"),
+        ("comps_workbook", "Comps_SK하이닉스_FY2025.xlsx"),
+        ("sangjeung_workbook", "상증법_에스케이트리켐_FY2025.xlsx"),
+    ):
+        monkeypatch.setattr(exporters, name, make(name, fname))
+
+    seen["expected_kwargs"] = lambda name, inp: _adapt_to_builder(
+        getattr(exporters, name), inp)[0]
     return seen
 
 
@@ -72,6 +83,80 @@ def _client(gated) -> TestClient:
     return c
 
 
+# ── 도구 ↔ 워크북 시그니처 정합성 (이 테스트가 없어서 엑셀이 깨진 채 배포됐다) ──────
+#
+# 실측 사고: compute_dcf 에 market 인자를 추가한 뒤 dcf_full_workbook 이
+# `unexpected keyword argument 'market'` 로 죽어 DCF 엑셀 다운로드가 전부 400 이 됐다.
+# 라우팅은 스텁으로, 생성기는 손으로 만든 인자로 각각 테스트했는데 **둘을 붙인 이음매**를
+# 검증하지 않아 놓쳤다. 아래는 실제 도구 스키마 × 실제 생성기 시그니처를 맞춰본다.
+def _tool_schema(name: str) -> dict:
+    from agent import registry
+
+    return next(s for s in registry.tool_schemas() if s["name"] == name)
+
+
+@pytest.mark.parametrize("kind", sorted(_XLSX_EXPORTS))
+def test_tool_input_binds_to_its_workbook_builder(kind):
+    """도구가 낼 수 있는 모든 인자를 넣어도 생성기 호출이 성립해야 한다."""
+    from excel import exporters
+
+    tool_name, builder_name, _ = _XLSX_EXPORTS[kind]
+    builder = getattr(exporters, builder_name)
+    props = _tool_schema(tool_name)["input_schema"]["properties"]
+
+    # 도구가 낼 수 있는 최대 입력(모든 프로퍼티) — 값은 타입만 맞춘 더미
+    dummy = {}
+    for k, spec in props.items():
+        t = spec.get("type")
+        dummy[k] = {"string": "X", "number": 1.0, "integer": 1,
+                    "boolean": True, "array": ["X"]}.get(t, "X")
+
+    kwargs, dropped = _adapt_to_builder(builder, dummy)
+    inspect.signature(builder).bind(**kwargs)   # 여기서 TypeError 면 이음매가 깨진 것
+
+    required = _tool_schema(tool_name)["input_schema"].get("required", [])
+    lost = [k for k in required if k in dropped and k not in _BUILDER_ALIASES]
+    assert not lost, f"{kind}: 필수 인자 {lost} 가 생성기에 전달되지 못한다"
+
+
+def test_adapter_maps_renamed_growth_argument():
+    """compute_dcf 는 revenue_growth_pct, dcf_workbook 은 revenue_growth 를 쓴다."""
+    from excel import exporters
+
+    kwargs, dropped = _adapt_to_builder(exporters.dcf_workbook,
+                                        {"revenue_growth_pct": 9.32, "company": "오리온"})
+    assert kwargs["revenue_growth"] == 9.32
+    assert "revenue_growth_pct" not in kwargs
+    assert dropped == []
+
+
+def test_adapter_drops_arguments_the_builder_cannot_take():
+    from excel import exporters
+
+    kwargs, dropped = _adapt_to_builder(exporters.dcf_full_workbook,
+                                        {"company": "오리온", "market": "KR", "bogus": 1})
+    assert "market" not in kwargs and "bogus" not in kwargs
+    assert set(dropped) == {"market", "bogus"}
+
+
+def test_overseas_dcf_excel_is_refused_not_silently_korean(gated, stub_builders):
+    """market=US 인데 생성기가 market 을 못 받으면, 한국 모델을 조용히 만들면 안 된다."""
+    sid = _seed([_ok("compute_dcf", {**DCF_INPUT, "market": "US"})])
+    r = _client(gated).post(f"/api/sessions/{sid}/export",
+                            json={"index": 1, "kind": "dcf_full"})
+    assert r.status_code == 400
+    assert "한국" in r.json()["detail"] and "US" in r.json()["detail"]
+    assert "builder" not in stub_builders
+
+
+def test_domestic_dcf_excel_passes_through(gated, stub_builders):
+    sid = _seed([_ok("compute_dcf", {**DCF_INPUT, "market": "KR"})])
+    r = _client(gated).post(f"/api/sessions/{sid}/export",
+                            json={"index": 1, "kind": "dcf_full"})
+    assert r.status_code == 200
+    assert "market" not in stub_builders["kwargs"], "생성기가 못 받는 인자는 걸러져야 한다"
+
+
 @pytest.mark.parametrize("kind, tool, tool_input, builder", [
     ("dcf_full", "compute_dcf", DCF_INPUT, "dcf_full_workbook"),
     ("dcf", "compute_dcf", DCF_INPUT, "dcf_workbook"),
@@ -86,7 +171,9 @@ def test_each_kind_routes_to_its_builder(gated, stub_builders, kind, tool, tool_
     assert r.headers["content-type"].startswith(XLSX_MIME)
     assert r.content.startswith(b"PK")
     assert stub_builders["builder"] == builder
-    assert stub_builders["kwargs"] == tool_input, "도구 입력을 그대로 재사용해야 한다"
+    # 도구 입력을 재사용하되, 생성기가 받는 이름으로 맞춰져 넘어가야 한다.
+    assert stub_builders["kwargs"] == stub_builders["expected_kwargs"](builder, tool_input)
+    assert stub_builders["kwargs"], "인자가 전부 걸러지면 생성기가 기본값으로 엉뚱한 걸 만든다"
 
 
 def test_korean_filename_survives_content_disposition(gated, stub_builders):
