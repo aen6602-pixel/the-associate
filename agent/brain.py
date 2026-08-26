@@ -13,6 +13,7 @@ LLM 은 "어떤 tool 을 어떤 인자로 부를지"만 결정한다. 숫자는 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -152,9 +153,23 @@ def _system_prompt() -> str:
 
 MAX_HISTORY_TURNS = 20  # 컨텍스트 폭주 방지 — 최근 N개 메시지만 두뇌에 전달
 
+# 한 질문에 허용하는 **LLM 왕복(라운드) 수**. 한 라운드에서 도구를 여러 개 부를 수 있으므로
+# 도구 호출 횟수 상한이 아니다. 이 상한이 필요한 이유:
+#   · 무한루프 방지 — 결론을 못 내고 도구만 계속 부르는 모델이 API 비용을 무한히 태우는 것을 막는다
+#   · 지연·비용 상한 — 라운드마다 이전 도구결과 전부를 다시 보내므로 뒤로 갈수록 비싸고 느리다
+# 6 이던 기본값을 12 로 올렸다: 절차서(load_skill + 참조 읽기)가 데이터 작업 전에 2~4 라운드를
+# 쓰기 때문에, 정식 DCF 한 건이 6 라운드로는 끝나지 않는다(실측: 도구 16회/다수 라운드).
+MAX_ROUNDS = max(1, int(os.getenv("AGENT_MAX_ROUNDS", "12")))
+
+
+def _round_limit_note(max_rounds: int) -> str:
+    return (f"⚠️ 도구 호출 라운드 상한({max_rounds}회)에 도달해 추가 조사를 중단하고, "
+            f"지금까지 확보한 근거만으로 정리했습니다. 빠진 항목이 있으면 질문을 나눠서 "
+            f"다시 물어봐 주세요.")
+
 
 # ── 공개 진입점: provider 로 분기 ─────────────────────────────────
-def answer(question: str, history: list[dict] | None = None, max_rounds: int = 6,
+def answer(question: str, history: list[dict] | None = None, max_rounds: int = MAX_ROUNDS,
            provider: str | None = None, model: str | None = None) -> Iterator[dict]:
     """history: [{"role": "user"|"assistant", "content": str}, ...] — 이전 turn.
     (LLM 두뇌 원칙과 무관: 대화 맥락 유지를 위한 것으로, tool 결과 자체는 여전히 provider 가 생성)
@@ -251,7 +266,24 @@ def _answer_gemini(question: str, history: list[dict], max_rounds: int,
             fr_parts.append(types.Part.from_function_response(name=fc.name, response=result))
         contents.append(types.Content(role="user", parts=fr_parts))
 
-    yield {"type": "error", "text": f"tool 호출이 {max_rounds}회를 넘었습니다. 질문을 좁혀주세요."}
+    # 상한 도달 — 에러만 내면 그동안 조회한 데이터가 전부 버려진다. 도구를 끄고 한 번 더 불러
+    # "지금까지 확보한 근거" 로 답을 만들게 한 뒤, 상한에 걸렸다는 사실을 함께 알린다.
+    yield {"type": "progress", "text": f"라운드 상한({max_rounds}) 도달 — 확보한 근거로 정리 중"}
+    try:
+        resp = client.models.generate_content(
+            model=model, contents=contents,
+            config=types.GenerateContentConfig(system_instruction=_system_prompt(),
+                                               temperature=0),
+        )
+        cand = resp.candidates[0] if resp.candidates else None
+        parts = (cand.content.parts if cand and cand.content else None) or []
+        text = "".join(p.text for p in parts if getattr(p, "text", None))
+    except Exception as e:  # noqa: BLE001
+        yield {"type": "error",
+               "text": f"라운드 상한({max_rounds}회)에 도달했고 마무리 응답도 실패했습니다: {e}"}
+        return
+    note = _round_limit_note(max_rounds)
+    yield {"type": "final", "text": f"{note}\n\n{text}".strip() if text else note}
 
 
 # ── Anthropic (Claude Code CLI — API 키 대신 로그인된 Enterprise 구독 재활용) ────
@@ -454,4 +486,18 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
                 "type": "function_call_output", "call_id": item.call_id, "output": content,
             })
 
-    yield {"type": "error", "text": f"tool 호출이 {max_rounds}회를 넘었습니다. 질문을 좁혀주세요."}
+    # 상한 도달 — 에러만 내면 그동안 조회한 데이터가 전부 버려진다. tool_choice="none" 으로
+    # 도구를 막고 한 번 더 불러 "지금까지 확보한 근거" 로 답을 만들게 한다.
+    yield {"type": "progress", "text": f"라운드 상한({max_rounds}) 도달 — 확보한 근거로 정리 중"}
+    try:
+        resp = client.responses.create(
+            model=model, instructions=_system_prompt(), input=input_list,
+            tools=tools, tool_choice="none",
+        )
+        text = getattr(resp, "output_text", None) or ""
+    except Exception as e:  # noqa: BLE001
+        yield {"type": "error",
+               "text": f"라운드 상한({max_rounds}회)에 도달했고 마무리 응답도 실패했습니다: {e}"}
+        return
+    note = _round_limit_note(max_rounds)
+    yield {"type": "final", "text": f"{note}\n\n{text}".strip() if text else note}
