@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from core.schema import DataError, Provenance, SourceType, Value
-from providers import damodaran, dart, naver
+from providers import damodaran, dart, naver, yahoo
 
 
 def _returns(series: list[dict]) -> dict[str, float]:
@@ -42,18 +42,41 @@ def _ols(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
 
 
 def regression_beta(company: str, period: str = "week", years: int = 5,
-                    index: str = "KOSPI") -> Value:
-    """상장사 레버드베타 — 네이버 시세로 OLS 회귀."""
-    ent = dart.resolve(company)
-    code = ent.get("stock_code")
-    if not code:
-        raise DataError(
-            f"{ent['corp_name']} 는 상장 종목코드가 없어(비상장) 회귀베타를 낼 수 없습니다. "
-            f"산업 무차입베타를 재레버리지하는 industry_beta 를 쓰세요.")
+                    index: str = "KOSPI", market: str = "KR",
+                    symbol: str | None = None) -> Value:
+    """레버드베타 — 주가·시장지수 시계열 OLS 회귀.
 
-    stock = naver.price_series(code, period, years)
-    market = naver.index_series(index, period, years)
-    sr, mr = _returns(stock), _returns(market)
+    market='KR' 이면 회사명을 DART 로 해석해 종목코드를 얻고 네이버(KRX) 시세를 쓴다.
+    그 외 시장(US/JP/TW/HK)은 Yahoo 를 쓰며, `symbol` 로 티커를 직접 준다
+    (예: AAPL, 7203.T, 2330.TW). symbol 을 생략하면 company 를 티커로 간주한다.
+    """
+    mkt = (market or "KR").strip().upper()
+
+    if mkt == "KR" and not symbol:
+        ent = dart.resolve(company)
+        code = ent.get("stock_code")
+        if not code:
+            raise DataError(
+                f"{ent['corp_name']} 는 상장 종목코드가 없어(비상장) 회귀베타를 낼 수 없습니다. "
+                f"산업 무차입베타를 재레버리지하는 industry_beta 를 쓰세요.")
+        name, ticker = ent["corp_name"], code
+        stock = naver.price_series(code, period, years)
+        market_series = naver.index_series(index, period, years)
+        index_name = index
+        src_name = "네이버 금융(KRX 시세)"
+        src_url = f"https://m.stock.naver.com/domestic/stock/{code}/total"
+    else:
+        ticker = (symbol or company or "").strip()
+        if not ticker:
+            raise DataError("해외 종목은 Yahoo 심볼(symbol)이 필요합니다. 예: AAPL, 7203.T")
+        name = ticker
+        stock = yahoo.price_series(ticker, period, years)
+        market_series = yahoo.index_series(mkt, period, years)
+        _, index_name = yahoo.market_index(mkt)
+        src_name = "Yahoo Finance"
+        src_url = f"https://finance.yahoo.com/quote/{ticker}"
+
+    sr, mr = _returns(stock), _returns(market_series)
     dates = sorted(set(sr) & set(mr))
     if len(dates) < 30:
         raise DataError(f"공통 관측치가 {len(dates)}개뿐이라 회귀가 불안정합니다 "
@@ -67,13 +90,13 @@ def regression_beta(company: str, period: str = "week", years: int = 5,
     if r2 < 0.1:
         warn = f" ⚠️ R² {r2:.3f} 가 낮아 시장과의 설명력이 약함 — 산업베타 병행 검토 권장."
     return Value(
-        round(beta, 4), "배", label=f"{ent['corp_name']} 레버드베타(회귀)",
+        round(beta, 4), "배", label=f"{name} 레버드베타(회귀)",
         provenance=Provenance(
-            source="계산엔진(engines.beta) · 네이버 금융(KRX 시세)",
+            source=f"계산엔진(engines.beta) · {src_name}",
             source_type=SourceType.COMPUTED,
-            source_url=f"https://m.stock.naver.com/domestic/stock/{code}/total",
+            source_url=src_url,
             as_of=dates[-1],
-            note=(f"{index} 대비 {period}봉 {years}년 OLS 회귀, 관측치 {len(dates)}개, "
+            note=(f"{index_name} 대비 {period}봉 {years}년 OLS 회귀, 관측치 {len(dates)}개, "
                   f"R² {r2:.3f}. β = Cov(주식,시장)/Var(시장). "
                   f"기간 {dates[0]}~{dates[-1]}.{warn}"),
         ),
@@ -131,10 +154,14 @@ def industry_beta(industry: str, country: str = "KR", de_ratio: float | None = N
 
 
 def beta_for(company: str, industry: str | None = None, country: str = "KR",
-             period: str = "week", years: int = 5, index: str = "KOSPI") -> Value:
-    """최선의 경로로 베타를 구한다 — 상장사는 회귀, 실패하거나 비상장이면 산업베타."""
+             period: str = "week", years: int = 5, index: str = "KOSPI",
+             market: str | None = None, symbol: str | None = None) -> Value:
+    """최선의 경로로 베타를 구한다 — 상장사는 회귀, 실패하거나 비상장이면 산업베타.
+
+    market 를 안 주면 country 를 시장으로 본다(KR→네이버/KOSPI, 그 외→Yahoo)."""
+    mkt = (market or country or "KR").strip().upper()
     try:
-        return regression_beta(company, period, years, index)
+        return regression_beta(company, period, years, index, mkt, symbol)
     except DataError as e:
         if industry is None:
             raise DataError(f"{e} (industry 를 함께 주면 산업베타로 대체 계산할 수 있습니다.)")

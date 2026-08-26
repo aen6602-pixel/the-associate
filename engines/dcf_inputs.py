@@ -21,7 +21,25 @@ from __future__ import annotations
 from statistics import mean
 
 from core.schema import DataError, Provenance, SourceType, Value
-from providers import damodaran, dart, ecos, fred
+from providers import damodaran, dart, dart_audit, ecos, fred
+
+
+def _audit(company: str, year: int | None = None) -> dict:
+    """비상장(외감법인) 폴백 — 감사보고서 원문 표에서 DCF 입력을 뽑는다.
+
+    상장사는 DART 정형 API 로 되지만 외감법인은 그 API 에 데이터가 없다(013 오류).
+    호출부는 1차 경로가 DataError 를 낼 때만 이걸 쓴다."""
+    ent = dart.resolve(company)
+    d = dart_audit.dcf_inputs(ent["corp_code"], year)
+    d["_name"] = ent["corp_name"]
+    return d
+
+
+def _audit_prov(d: dict, field: str, note: str) -> Provenance:
+    return Provenance(
+        source="DART 감사보고서(외감법인 원문)", source_type=SourceType.AUTHORITATIVE,
+        source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['_rcept']}",
+        original_field=field, as_of=f"FY{d['_year']}", note=note)
 
 
 def _computed(value, unit: str, label: str, note: str, as_of: str | None = None,
@@ -44,8 +62,11 @@ def net_debt(company: str, year: int | None = None, include_lease: bool = True,
     IBD = 단기차입금(유동성장기부채 포함) + 장기차입금·사채 (+ 리스부채, IFRS 16).
     리스부채를 포함하는 게 기본값이다 — D&A 에 사용권자산상각비가 들어가 있으므로
     분자·분모의 처리를 일치시킨다. 음수면 순현금(net cash) 상태다."""
-    db = dart.debt_balances(company, year, report, prefer)
-    cash = dart.financial_item(company, "cash", year, report, prefer)
+    try:
+        db = dart.debt_balances(company, year, report, prefer)
+        cash = dart.financial_item(company, "cash", year, report, prefer)
+    except DataError:
+        return _net_debt_from_audit(company, year, include_lease)
 
     st, lt = db["short_term"].value, db["long_term"].value
     lease = db["lease"].value if include_lease else 0
@@ -64,6 +85,31 @@ def net_debt(company: str, year: int | None = None, include_lease: bool = True,
                          ibd, "KRW", "이자발생부채(IBD)",
                          f"단기 {f(st)} + 장기 {f(lt)}{lease_txt}", cash.provenance.as_of),
                              "cash": cash})
+
+
+def _net_debt_from_audit(company: str, year: int | None, include_lease: bool) -> Value:
+    d = _audit(company, year)
+    if "cash" not in d:
+        raise DataError(
+            f"{d['_name']} 감사보고서에서 현금및현금성자산을 찾지 못해 순부채를 계산할 수 없습니다.")
+    st = d.get("short_term_debt", {}).get("amount", 0)
+    lt = d.get("long_term_debt", {}).get("amount", 0)
+    lease = d.get("lease_liability", {}).get("amount", 0) if include_lease else 0
+    cash = d["cash"]["amount"]
+    ibd = st + lt + lease
+    nd = ibd - cash
+    f = lambda x: f"{x:,.0f}"  # noqa: E731
+    note = (f"[비상장·감사보고서] IBD {f(ibd)} (단기 {f(st)} + 장기 {f(lt)}"
+            + (f" + 리스 {f(lease)}" if lease else "")
+            + f") − 현금 {f(cash)} = 순부채 {f(nd)}"
+            + (" → 순현금 상태" if nd < 0 else "")
+            + ". 감사보고서 본표에서 못 찾은 차입금 항목은 0 으로 잡히므로 과소계상 가능 — "
+              "note 의 구성요소를 확인할 것.")
+    return Value(nd, "KRW", label=f"{d['_name']} 순부채",
+                 provenance=_audit_prov(d, "재무상태표/차입금·현금", note),
+                 extras={"cash": Value(cash, "KRW", label=f"{d['_name']} 현금및현금성자산",
+                                       provenance=_audit_prov(d, "재무상태표/현금및현금성자산",
+                                                              "감사보고서 본표"))})
 
 
 # ── 5개년 실적 비율 ───────────────────────────────────────────────
@@ -230,14 +276,18 @@ def cost_of_debt(company: str, year: int | None = None, include_lease: bool = Tr
     (삼성전자 FY2025 실측: 금융비용 11.7조/차입금 24.1조 → 48.8% 라는 비상식적 값).
     현금흐름표의 이자 전용 계정(이자비용 조정 또는 이자의 지급)을 쓴다.
     기말 잔액 기준이라 차입금이 급변한 해에는 왜곡될 수 있어 note 에 밝힌다."""
-    cf = dart.cf_extras(company, year, report, prefer)
+    try:
+        cf = dart.cf_extras(company, year, report, prefer)
+        db = dart.debt_balances(company, year, report, prefer)
+    except DataError:
+        return _cost_of_debt_from_audit(company, year, include_lease)
+
     interest = cf.get("interest")
     if interest is None:
         raise DataError(
             f"{company} 의 이자비용을 현금흐름표에서 찾지 못했습니다. Kd 를 직접 지정하거나 "
             f"산업평균(get_industry_benchmarks)을 쓰세요.")
 
-    db = dart.debt_balances(company, year, report, prefer)
     lease = db["lease"].value if include_lease else 0
     ibd = db["short_term"].value + db["long_term"].value + lease
     if ibd <= 0:
@@ -254,6 +304,30 @@ def cost_of_debt(company: str, year: int | None = None, include_lease: bool = Tr
         note += f" ⚠️ {kd:.2f}% 는 통상 범위(0.3~15%)를 벗어남 — 검토 필요."
     return _computed(round(kd, 2), "%", f"{interest.label.split(' 이자')[0]} 세전 타인자본비용(Kd)",
                      note, interest.provenance.as_of, extras={"interest_expense": interest})
+
+
+def _cost_of_debt_from_audit(company: str, year: int | None, include_lease: bool) -> Value:
+    d = _audit(company, year)
+    if "interest_paid" not in d:
+        raise DataError(
+            f"{d['_name']} 감사보고서 현금흐름표에서 '이자의 지급' 을 찾지 못했습니다. "
+            f"Kd 를 직접 지정하거나 산업평균(get_industry_benchmarks)을 쓰세요.")
+    st = d.get("short_term_debt", {}).get("amount", 0)
+    lt = d.get("long_term_debt", {}).get("amount", 0)
+    lease = d.get("lease_liability", {}).get("amount", 0) if include_lease else 0
+    ibd = st + lt + lease
+    if ibd <= 0:
+        raise DataError(f"{d['_name']} 는 감사보고서상 이자발생부채가 0 이라 Kd 를 계산할 수 "
+                        f"없습니다. 산업평균 Kd 를 쓰세요.")
+    interest = d["interest_paid"]["amount"]
+    kd = interest / ibd * 100
+    f = lambda x: f"{x:,.0f}"  # noqa: E731
+    note = (f"[비상장·감사보고서] 이자의 지급 {f(interest)} ÷ IBD {f(ibd)} = {kd:.2f}% "
+            f"(현금주의, 기말 잔액 기준).")
+    if kd > 15 or kd < 0.3:
+        note += f" ⚠️ {kd:.2f}% 는 통상 범위(0.3~15%)를 벗어남 — 검토 필요."
+    return Value(round(kd, 2), "%", label=f"{d['_name']} 세전 타인자본비용(Kd)",
+                 provenance=_audit_prov(d, "현금흐름표/이자의 지급", note))
 
 
 # ── 영구성장률 ────────────────────────────────────────────────────

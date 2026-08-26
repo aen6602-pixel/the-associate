@@ -100,8 +100,13 @@ tool 쌍으로 찾는다:
   전 연도 UFCF 가 음수이거나 EV·지분가치가 음수면 그 숫자를 밸류에이션 결과로 제시하지 말고
   "이 입력 조합으로는 산출 불가(NM)" 라고 밝힌 뒤 어떤 가정이 원인인지 설명한다. 경기민감 업종에
   과거 5개년 평균 CAPEX 를 그대로 쓰면 흔히 발생한다.
-- 비상장사는 회귀베타가 불가하니 `get_beta`/`compute_wacc_auto` 에 `industry`(Damodaran 산업명)를
-  함께 넘긴다.
+- **비상장사(외감법인)**: 순부채·Kd 는 감사보고서 원문에서 자동으로 뽑히므로 `get_net_debt`·
+  `get_cost_of_debt` 를 그대로 부른다. 다만 회귀베타는 불가하니 `get_beta`/`compute_wacc_auto` 에
+  `industry`(Damodaran 산업명)를 함께 넘긴다. 감사보고서에 없는 항목은 명확한 오류로 돌아오니
+  그 항목만 가정으로 처리한다.
+- **해외 상장사**: `get_beta` 에 `market`(US/JP/TW/HK)과 `symbol`(Yahoo 티커: AAPL, 7203.T,
+  2330.TW)을 함께 넘긴다 — 안 주면 국내 지수(KOSPI)와 회귀돼 엉뚱한 베타가 나온다.
+  재무는 get_financial_item_us/jp/tw 를 쓴다.
 
 ## 답변 방식
 - 한국어로 답한다. 간결하게, 핵심 숫자 먼저.

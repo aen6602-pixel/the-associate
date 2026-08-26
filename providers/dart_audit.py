@@ -20,6 +20,11 @@ from core import config
 _BASE = "https://opendart.fss.or.kr/api"
 
 # 계정 → 라벨 후보 (공백 제거·정규화된 형태로 비교)
+#
+# 아래 DCF 입력용 항목들은 **감사보고서 본표(재무상태표·현금흐름표)** 에 나오는 것만 넣는다.
+# 주석 표는 단위가 다른 경우가 많아(실측: 에스케이트리켐 FY2025 본표 '이자의 지급' 2,900,896,319원
+# vs 주석 '이자비용' 2,811,495천원) 섞이면 1000배 오차가 난다. `_extract_row` 가 문서 앞에서부터
+# 첫 매칭을 취하고 본표가 주석보다 앞에 오므로 본표 값이 잡힌다.
 _LABELS = {
     "net_income": {"당기순이익", "당기순이익(손실)", "당기순손익", "당기순이익(손실)"},
     "total_equity": {"자본총계"},
@@ -27,11 +32,37 @@ _LABELS = {
     "total_liabilities": {"부채총계"},
     "revenue": {"매출액", "수익(매출액)", "영업수익"},
     "operating_income": {"영업이익", "영업이익(손실)"},
+    "sga": {"판매비와관리비", "판매비및관리비", "판매관리비"},
+    # ── DCF 입력용 (재무상태표) ──
+    "cash": {"현금및현금성자산", "현금및현금등가물"},
+    "trade_receivables": {"매출채권", "매출채권및기타채권", "매출채권(순액)"},
+    "inventories": {"재고자산"},
+    "trade_payables": {"매입채무", "매입채무및기타채무"},
+    "short_term_debt": {"단기차입금", "유동성장기차입금", "유동성장기부채", "단기차입부채"},
+    "long_term_debt": {"장기차입금", "사채", "비유동차입금", "장기차입부채"},
+    "lease_liability": {"리스부채", "유동리스부채", "비유동리스부채"},
+    # ── DCF 입력용 (현금흐름표) ──
+    "capex": {"유형자산의취득", "유형자산취득"},
+    "capex_intangible": {"무형자산의취득", "무형자산취득"},
+    "interest_paid": {"이자의지급", "이자지급", "이자의지급액"},
+    "ocf": {"영업활동으로인한현금흐름", "영업활동현금흐름", "영업활동으로인한순현금흐름"},
 }
+
+# 본표에 없고 주석에만 있는 항목 — 단위가 다를 수 있어 호출부에서 매출 대비 비율로 검증해야 한다.
+NOTE_ONLY_ITEMS = frozenset({"depreciation"})
+_LABELS["depreciation"] = {"감가상각비", "감가상각비및무형자산상각비"}
+
+
 def _norm(s: str) -> str:
-    """공백 제거 + 앞머리 번호(Ⅰ. / 1. / (1)) 제거 → 'Ⅰ. 매출액' → '매출액'."""
+    """비교용 정규화: 공백 제거 + 앞머리 번호(Ⅰ. / 1. / (1)) 제거 + 뒤따르는 주석 참조 제거.
+
+    실측: 포마트 감사보고서는 계정명에 주석 번호가 붙는다 — '매출채권(주석4, 10)',
+    '단기차입금(주석8,9,10,11)'. 이걸 안 떼면 라벨 완전일치가 전부 실패한다.
+    """
     s = re.sub(r"\s+", "", s or "")
     s = re.sub(r"^[（(]?[0-9Ⅰ-Ⅹⅰ-ⅹ]+[).．]?", "", s)
+    s = re.sub(r"[（(]주석[^）)]*[）)]", "", s)   # (주석4,10) 제거
+    s = re.sub(r"[（(]\s*주\s*[0-9,，\s]*[）)]", "", s)  # (주1) 형태
     return s
 
 
@@ -179,6 +210,51 @@ def multiyear(corp_code: str, item: str, target_year: int) -> list[dict]:
         r = _year_amount(corp_code, item, y)
         if r is not None:
             out.append({"year": y, "amount": r[0], "rcept": r[1]})
+    return out
+
+
+def dcf_inputs(corp_code: str, year: int | None = None) -> dict:
+    """비상장 감사보고서에서 DCF·WACC 입력 원자료를 뽑는다.
+
+    상장사는 DART 정형 API(`providers.dart`)로 같은 값을 얻지만, 외감법인은 그 API 에
+    데이터가 없어(013 오류) 감사보고서 원문 표를 파싱해야 한다.
+
+    돌려주는 dict: {항목: {"amount", "rcept", "year"}} — 못 찾은 항목은 아예 키가 없다
+    (0 으로 채우지 않는다). 현금흐름표 유출 항목(capex·이자의 지급)은 음수로 공시되므로
+    **절댓값**으로 정규화해 상장사 경로와 부호를 맞춘다.
+
+    `depreciation` 은 본표가 아닌 주석에서만 나오는 경우가 많고 주석표는 단위가 다를 수 있어
+    (실측: 본표 원 vs 주석 천원) **매출 대비 0.3~40% 검증을 통과할 때만** 담는다.
+    """
+    reports = _reports_map(corp_code)
+    if not reports:
+        raise DataError("감사보고서를 찾지 못함(비상장 재무 없음)")
+    yr = year if (year in reports) else max(reports)
+
+    out: dict[str, dict] = {}
+    for item in ("cash", "trade_receivables", "inventories", "trade_payables",
+                 "short_term_debt", "long_term_debt", "lease_liability",
+                 "capex", "capex_intangible", "interest_paid", "ocf", "revenue"):
+        try:
+            amount, rcept, used = year_value(corp_code, item, yr)
+        except DataError:
+            continue
+        if item in ("capex", "capex_intangible", "interest_paid"):
+            amount = abs(amount)
+        out[item] = {"amount": amount, "rcept": rcept, "year": used}
+
+    rev = (out.get("revenue") or {}).get("amount")
+    try:
+        amount, rcept, used = year_value(corp_code, "depreciation", yr)
+        amount = abs(amount)
+        if rev and 0.003 <= amount / rev <= 0.40:
+            out["depreciation"] = {"amount": amount, "rcept": rcept, "year": used,
+                                   "note": "주석 표에서 추출(매출 대비 검증 통과)"}
+    except DataError:
+        pass
+
+    out["_year"] = yr
+    out["_rcept"] = reports[yr]
     return out
 
 

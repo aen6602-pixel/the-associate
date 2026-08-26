@@ -216,9 +216,11 @@ def _terminal_growth(country: str = "KR", tenor: str = "10Y") -> Value:
 
 
 def _beta(company: str, industry: str | None = None, country: str = "KR",
-          period: str = "week", years: int = 5) -> Value:
+          period: str = "week", years: int = 5, market: str | None = None,
+          symbol: str | None = None) -> Value:
     return beta_engine.beta_for(company, _blank(industry), country,
-                               _blank(period) or "week", int(_pos(years) or 5))
+                               _blank(period) or "week", int(_pos(years) or 5),
+                               "KOSPI", _blank(market), _blank(symbol))
 
 
 def _industry_benchmarks(industry: str, country: str = "KR") -> Value:
@@ -868,6 +870,16 @@ REGISTRY: dict[str, dict] = {
                     "period": {"type": "string",
                                "description": "회귀 주기: day | week | month. 기본 week."},
                     "years": {"type": "integer", "description": "회귀 기간(년). 기본 5."},
+                    "market": {
+                        "type": "string",
+                        "description": "시장: KR(네이버·KOSPI) | US(S&P500) | JP(닛케이225) | "
+                                       "TW(TAIEX) | HK(항셍). 생략하면 country 를 따른다.",
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "해외 종목의 Yahoo 티커. 예: AAPL, 7203.T(도요타), "
+                                       "2330.TW(TSMC). 해외 시장이면 반드시 지정한다.",
+                    },
                 },
                 "required": ["company"],
                 "additionalProperties": False,
