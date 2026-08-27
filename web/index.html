@@ -2,9 +2,24 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- viewport-fit=cover: 노치·홈인디케이터 영역까지 배경을 채우고, 실제 여백은 CSS 의
+     env(safe-area-inset-*) 로 준다. 이게 없으면 아이폰에서 하단 입력창이 홈바에 가린다.
+     maximum-scale 은 넣지 않는다 — 확대를 막으면 접근성이 깨진다(대신 입력 글자를 16px 로
+     올려 iOS 의 자동 확대를 원인부터 없앤다). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <title>The Associate</title>
+
+<!-- PWA: 홈 화면에 추가하면 주소창 없이 앱처럼 실행된다 -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0A0E17">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- iOS 전용(표준 mobile-web-app-capable 을 아직 안 보는 버전이 있다) -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Associate">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230A0E17'/><text y='23' x='6' font-size='20' fill='%23F0B429' font-family='sans-serif' font-weight='600'>A</text></svg>">
 </head>
@@ -58,6 +73,11 @@
       <button class="ghost sm" id="logout-btn" title="로그아웃">Out</button>
     </div>
 
+    <!-- 홈 화면 설치. 안드로이드·데스크톱 Chrome 은 버튼으로, iOS 는 안내 문구로
+         (Safari 는 프롬프트를 코드로 띄우는 API 를 제공하지 않는다). -->
+    <button class="ghost wide" id="install-btn" hidden>📲&nbsp; 홈 화면에 앱으로 추가</button>
+    <p class="hint" id="install-hint" hidden></p>
+
     <div class="sec">Conversations</div>
     <button class="ghost wide" id="new-session">＋&nbsp; New session</button>
     <p class="warn" id="ephemeral-warn" hidden>⚠︎ Ephemeral storage — conversations reset on redeploy.</p>
@@ -97,6 +117,8 @@
     </div>
   </aside>
 
+  <!-- 모바일에서 사이드바가 화면을 덮을 때 뒤를 눌러 닫는 영역. 데스크톱에선 항상 숨김. -->
+  <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
   <main class="main">
     <button class="ghost sm sidebar-toggle" id="sidebar-toggle" title="사이드바">☰</button>
     <div class="content">

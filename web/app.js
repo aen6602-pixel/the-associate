@@ -501,9 +501,28 @@ function scrollToEnd() {
 const composer = $('composer');
 const questionBox = $('question');
 
+// 안내문(placeholder)은 좁은 화면에서 두 줄로 감기고, rows=1 높이(44px)에 잘려 뒷부분이
+// 안 보였다(실측 360px: 필요 68px vs 실제 44px). 자동 확장은 input 이벤트에만 걸려 있어
+// 아직 입력이 없는 placeholder 는 그 혜택을 못 받는다 → 좁을 때는 짧은 문구를 쓴다.
+const PLACEHOLDER_FULL = 'Instruct the associate…  (밸류에이션·데이터 질문)';
+const PLACEHOLDER_SHORT = 'Instruct the associate…';
+
+function fitPlaceholder() {
+  questionBox.placeholder = window.matchMedia('(max-width: 640px)').matches
+    ? PLACEHOLDER_SHORT : PLACEHOLDER_FULL;
+}
+fitPlaceholder();
+window.matchMedia('(max-width: 640px)').addEventListener('change', fitPlaceholder);
+
+// 입력창 최대 높이. 모바일 키보드가 올라오면 innerHeight 는 그대로인데 실제 보이는 영역만
+// 줄어드는 기기가 있어(iOS) visualViewport 를 우선 쓴다.
+function viewportHeight() {
+  return (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+}
+
 questionBox.addEventListener('input', () => {
   questionBox.style.height = 'auto';
-  questionBox.style.height = `${Math.min(questionBox.scrollHeight, window.innerHeight * 0.4)}px`;
+  questionBox.style.height = `${Math.min(questionBox.scrollHeight, viewportHeight() * 0.4)}px`;
 });
 
 questionBox.addEventListener('keydown', (e) => {
@@ -619,11 +638,127 @@ async function submitQuestion(question) {
   }
 }
 
-/* ── 사이드바 토글 (좁은 화면) ───────────────────────── */
+/* ── 사이드바 (좁은 화면에서는 오버레이) ─────────────── */
+function setSidebar(open) {
+  $('sidebar').classList.toggle('collapsed', !open);
+  $('sidebar-backdrop').hidden = !open;
+  // 사이드바가 열린 동안 뒤 본문이 스크롤되면 방향감각을 잃는다.
+  document.body.style.overflow = open ? 'hidden' : '';
+}
+
+function sidebarIsOverlay() {
+  return window.matchMedia('(max-width: 860px)').matches;
+}
+
 $('sidebar-toggle').addEventListener('click', () => {
-  $('sidebar').classList.toggle('collapsed');
+  setSidebar($('sidebar').classList.contains('collapsed'));
+});
+$('sidebar-backdrop').addEventListener('click', () => setSidebar(false));
+
+// 오버레이 상태에서 대화를 고르거나 새로 만들면 사이드바가 화면을 덮은 채 남아
+// 결과가 안 보인다 → 선택 즉시 닫는다.
+$('session-list').addEventListener('click', () => {
+  if (sidebarIsOverlay()) setSidebar(false);
+});
+$('new-session').addEventListener('click', () => {
+  if (sidebarIsOverlay()) setSidebar(false);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && sidebarIsOverlay()) setSidebar(false);
+});
+
+// 데스크톱 폭으로 돌아오면 사이드바는 항상 보이는 상태여야 한다(백드롭도 치운다).
+window.matchMedia('(max-width: 860px)').addEventListener('change', (e) => {
+  if (!e.matches) {
+    $('sidebar').classList.remove('collapsed');
+    $('sidebar-backdrop').hidden = true;
+    document.body.style.overflow = '';
+  } else {
+    setSidebar(false);
+  }
+});
+
+// 폰에서는 처음에 사이드바를 접어 본문부터 보여준다.
+if (sidebarIsOverlay()) setSidebar(false);
+
+/* ── 모바일 키보드 ───────────────────────────────────── */
+// iOS 는 키보드가 올라올 때 뷰포트를 밀어올리기만 해서 입력창이 키보드 뒤로 숨는다.
+// visualViewport 로 실제 보이는 높이를 CSS 변수에 넣어 shell 높이를 맞춘다.
+if (window.visualViewport) {
+  const fit = () => {
+    const vv = window.visualViewport;
+    document.documentElement.style.setProperty('--vvh', `${vv.height}px`);
+    // 키보드가 올라온 동안에는 마지막 메시지가 보이도록 붙여둔다.
+    if (document.activeElement === $('question')) scrollToEnd();
+  };
+  window.visualViewport.addEventListener('resize', fit);
+  window.visualViewport.addEventListener('scroll', fit);
+  fit();
+}
+
+/* ── PWA: 서비스워커 + 홈 화면 설치 ──────────────────── */
+// SW 는 https 또는 localhost 에서만 등록된다(파일로 열면 조용히 실패하는 게 정상).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then((reg) => {
+        // 새 버전이 준비되면 다음 진입에서 바로 쓰이게 교체를 요청한다.
+        reg.addEventListener('updatefound', () => {
+          const sw = reg.installing;
+          if (sw) sw.addEventListener('statechange', () => {
+            if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+              sw.postMessage('skip-waiting');
+            }
+          });
+        });
+      })
+      .catch(() => { /* 등록 실패는 앱 동작에 영향 없음 — 조용히 넘긴다 */ });
+  });
+}
+
+// 안드로이드/데스크톱 Chrome 은 설치 프롬프트를 코드로 띄울 수 있다. iOS 는 불가능해서
+// (Safari 공유 → '홈 화면에 추가' 만 가능) 그 경우엔 안내 문구로 대체한다.
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  const btn = $('install-btn');
+  if (btn) btn.hidden = false;
+});
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches
+    || window.navigator.standalone === true;
+}
+
+function initInstallUi() {
+  const btn = $('install-btn');
+  const hint = $('install-hint');
+  if (!btn || !hint) return;
+  if (isStandalone()) return;            // 이미 앱으로 실행 중
+
+  const isIos = /iP(hone|ad|od)/.test(navigator.userAgent);
+  if (isIos) {
+    hint.hidden = false;
+    hint.textContent = '홈 화면에 추가: 공유 버튼 → "홈 화면에 추가"';
+    return;
+  }
+  btn.addEventListener('click', async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    installPrompt = null;
+    if (outcome === 'accepted') btn.hidden = true;
+  });
+}
+
+window.addEventListener('appinstalled', () => {
+  const btn = $('install-btn');
+  if (btn) btn.hidden = true;
 });
 
 /* ── 시작 ───────────────────────────────────────────── */
 setTimeout(() => { const s = $('splash'); if (s) s.remove(); }, 2300);
+initInstallUi();
 boot();

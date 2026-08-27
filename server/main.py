@@ -437,6 +437,42 @@ def index() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 
+# ── PWA (홈 화면 설치 · 앱처럼 실행) ─────────────────────────────
+# 서비스워커는 **자기 경로 아래만** 제어할 수 있다. /static/sw.js 로 두면 /static/* 만
+# 담당하게 되어 화면 진입(navigation)을 못 잡는다 → 루트에서 서빙해야 scope 가 '/' 가 된다.
+@app.get("/sw.js")
+def service_worker() -> FileResponse:
+    return FileResponse(
+        WEB_DIR / "sw.js", media_type="application/javascript",
+        headers={
+            # SW 파일 자체가 캐시되면 새 배포가 사용자 기기에 영원히 안 내려간다.
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Service-Worker-Allowed": "/",
+        })
+
+
+@app.get("/manifest.webmanifest")
+def manifest() -> FileResponse:
+    return FileResponse(
+        WEB_DIR / "manifest.webmanifest", media_type="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=3600"})
+
+
+# iOS 는 링크 태그를 못 읽는 상황(홈화면 추가 시점)에 루트의 관례 경로를 직접 찾는다.
+@app.get("/apple-touch-icon.png")
+@app.get("/apple-touch-icon-precomposed.png")
+def apple_icon() -> FileResponse:
+    return FileResponse(WEB_DIR / "icons" / "apple-touch-icon.png",
+                        media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/favicon.ico")
+def favicon() -> FileResponse:
+    return FileResponse(WEB_DIR / "icons" / "favicon-32.png", media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.exception_handler(HTTPException)
 def _http_error(request: Request, exc: HTTPException) -> JSONResponse:
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,

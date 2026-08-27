@@ -117,7 +117,14 @@ button:disabled { opacity: .5; cursor: default; }
 .gate-hint { margin: 0; color: var(--text-mute); font-size: .8rem; text-align: center; }
 
 /* ── 레이아웃 ───────────────────────────────────────── */
-.shell { display: flex; height: 100vh; overflow: hidden; }
+/* height 를 100vh 로 두면 iOS Safari 가 주소창을 뺀 높이를 주지 않아 하단 입력창이
+   화면 밖으로 밀린다. dvh(동적 뷰포트)는 주소창이 접히고 펴지는 것을 반영한다 —
+   지원하지 않는 구형 브라우저를 위해 100vh 를 먼저 두고 덮어쓴다. */
+/* --vvh 는 app.js 가 visualViewport.height 로 채운다(모바일 키보드가 올라온 실제 높이).
+   dvh 만으로는 iOS 에서 키보드가 뷰포트를 밀어올릴 때 입력창이 키보드 뒤로 숨는다.
+   변수가 없는 환경(데스크톱·구형)에서는 dvh → vh 로 자연스럽게 내려간다. */
+.shell { display: flex; height: 100vh; height: 100dvh; height: var(--vvh, 100dvh);
+         overflow: hidden; }
 
 .sidebar {
   width: var(--sidebar-w); flex: 0 0 var(--sidebar-w); background: var(--panel);
@@ -125,6 +132,8 @@ button:disabled { opacity: .5; cursor: default; }
   overflow-y: auto; font-size: .88rem;
 }
 .sidebar.collapsed { display: none; }
+/* 데스크톱에선 존재하지 않는 요소처럼 둔다 — 미디어쿼리 안에서만 켠다. */
+.sidebar-backdrop { display: none; }
 
 .viewer-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem;
               margin-bottom: .6rem; }
@@ -307,7 +316,17 @@ button:disabled { opacity: .5; cursor: default; }
 .md blockquote { margin: .7rem 0; padding: .1rem .9rem; border-left: 3px solid var(--line);
                  color: var(--text-dim); }
 .md hr { border: none; border-top: 1px solid var(--line); margin: 1.2rem 0; }
-.md-table-wrap { overflow-x: auto; margin: .8rem 0; }
+/* 표는 좁은 화면에서 반드시 넘친다. 잘린 것을 모르고 지나치지 않도록 오른쪽에 페이드를
+   깔고(배경 그라디언트), iOS 관성 스크롤을 켠다. 표 자체를 접거나 열을 숨기지는 않는다 —
+   숫자를 임의로 감추면 그게 곧 오독이다. */
+.md-table-wrap {
+  overflow-x: auto; margin: .8rem 0; -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  background:
+    linear-gradient(to right, var(--bg) 30%, transparent) left / 2.2rem 100% no-repeat,
+    linear-gradient(to left,  var(--bg) 30%, transparent) right / 2.2rem 100% no-repeat;
+  background-attachment: local, local;
+}
 .md table { border-collapse: collapse; font-size: .9rem; min-width: 100%; }
 .md th, .md td { border: 1px solid var(--line); padding: .4rem .6rem; text-align: left;
                  white-space: nowrap; }
@@ -318,7 +337,7 @@ button:disabled { opacity: .5; cursor: default; }
 .composer { display: flex; gap: .6rem; align-items: flex-end;
             padding: .9rem 2.2rem 1.3rem; border-top: 1px solid var(--line); background: var(--bg); }
 .composer textarea {
-  flex: 1; resize: none; max-height: 40vh; background: var(--panel);
+  flex: 1; resize: none; max-height: 40dvh; background: var(--panel);
   border: 1px solid var(--line); border-radius: var(--radius); padding: .7rem .85rem;
   outline: none; line-height: 1.5;
 }
@@ -346,7 +365,8 @@ button:disabled { opacity: .5; cursor: default; }
 .tile-l { font-size: .74rem; color: var(--text-mute); margin-top: .25rem;
           letter-spacing: .08em; }
 
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius);
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch;
+              border: 1px solid var(--line); border-radius: var(--radius);
               background: var(--panel); }
 .admin-table { border-collapse: collapse; width: 100%; font-size: .86rem; }
 .admin-table th, .admin-table td { padding: .55rem .7rem; text-align: left;
@@ -380,15 +400,101 @@ button:disabled { opacity: .5; cursor: default; }
               gap: 1.2rem; }
 
 /* ── 좁은 화면 ──────────────────────────────────────── */
+/* ── 태블릿 이하: 사이드바를 오버레이로 ───────────────── */
 @media (max-width: 860px) {
   :root { --sidebar-w: 290px; }
-  .sidebar { position: absolute; z-index: 10; height: 100%; }
+  .sidebar {
+    position: absolute; z-index: 20; height: 100%;
+    /* 노치가 있는 기기를 가로로 눕히면 사이드바가 노치 아래로 들어간다 */
+    padding-left: max(.9rem, env(safe-area-inset-left));
+    box-shadow: 0 0 40px #00000080;
+  }
   .sidebar.collapsed { display: none; }
   .sidebar-toggle { display: block; }
+  /* 사이드바가 열려 있을 때만 뒤를 눌러 닫을 수 있게 한다(JS 가 hidden 을 토글). */
+  .sidebar-backdrop { display: block; position: absolute; inset: 0; z-index: 15;
+                      background: #000000a6; }
+  .sidebar-backdrop[hidden] { display: none; }
+
   .content { padding: 3.2rem 1.1rem 1rem; }
   .composer { padding: .8rem 1.1rem 1.1rem; }
   .content > h1 { font-size: 1.7rem; }
   .content > h1 .by { font-size: .85rem; margin-left: .45rem; }
   .byline { font-size: .95rem; }
   .lede, .caps li { font-size: 1rem; }
+}
+
+/* ── 폰: 터치·노치·키보드 ─────────────────────────────── */
+@media (max-width: 640px) {
+  /* iOS 는 글자가 16px 보다 작은 입력에 포커스하면 화면을 확대한다. 확대를 막는 대신
+     (접근성이 깨진다) 원인인 글자 크기를 16px 로 올린다. body 는 15px 이라 상속만으로는
+     항상 15px 이 되어 확대가 계속 일어났다. */
+  input, select, textarea { font-size: 16px; }
+
+  /* 노치·홈인디케이터. viewport-fit=cover 로 화면을 꽉 쓰는 대신 여백을 여기서 준다. */
+  .content {
+    padding: 3.1rem max(1rem, env(safe-area-inset-right)) .8rem
+             max(1rem, env(safe-area-inset-left));
+  }
+  .composer {
+    padding: .7rem max(.9rem, env(safe-area-inset-right))
+             calc(.7rem + env(safe-area-inset-bottom))
+             max(.9rem, env(safe-area-inset-left));
+    gap: .5rem;
+  }
+  /* 터치 타깃 최소 44px (Apple HIG). 42px 이었다. */
+  .composer .primary { width: 44px; height: 44px; flex: 0 0 44px; }
+  .composer textarea { max-height: 32dvh; padding: .65rem .8rem; }
+
+  .content > h1 { font-size: 1.45rem; }
+  /* 좁은 화면에서 크레딧이 제목을 밀어 두 줄로 깨지므로 아래로 내린다. */
+  .content > h1 .by { display: block; margin: .2rem 0 0; font-size: .8rem; }
+  .lede { font-size: .98rem; }
+  .chat { gap: 1.1rem; margin-top: 1.2rem; }
+  .msg { gap: .6rem; }
+  .msg .avatar { flex-basis: 24px; width: 24px; height: 24px; font-size: .7rem; }
+
+  /* 표·코드는 폭을 줄여 더 많은 열이 한 화면에 들어오게 한다(스크롤은 그대로 가능). */
+  .md table { font-size: .82rem; }
+  .md th, .md td { padding: .4rem .5rem; }
+  /* 재무 표는 폰에서 반드시 오른쪽이 잘린다. 첫 열(보통 회사명·항목명)을 고정해 두면
+     오른쪽으로 밀어도 "이게 어느 회사 숫자인지" 를 잃지 않는다. 열을 숨기는 방식은
+     쓰지 않는다 — 숫자를 임의로 감추는 건 오독을 만든다.
+     배경은 반드시 불투명해야 한다(줄무늬 행 색을 그대로 따라가야 아래 텍스트가
+     비쳐 보이지 않는다). */
+  .md-table-wrap th:first-child,
+  .md-table-wrap td:first-child {
+    position: sticky; left: 0; z-index: 1;
+    background: var(--bg);
+    /* 고정 열과 스크롤 영역의 경계를 눈에 보이게 */
+    box-shadow: 1px 0 0 var(--line);
+  }
+  .md-table-wrap th:first-child { background: var(--panel-2); z-index: 2; }
+  .md-table-wrap tbody tr:nth-child(even) td:first-child { background: #10161F; }
+  .md pre { font-size: .78rem; }
+
+  /* 내보내기 버튼이 한 줄에 두 개씩 들어가게 */
+  .exports .ghost { flex: 1 1 calc(50% - .4rem); text-align: center; }
+
+  .wordmark { font-size: 1.7rem; letter-spacing: .28em; padding-left: .28em; }
+  .byline { font-size: .85rem; letter-spacing: .14em; padding-left: .14em; }
+  .decision-opts .ghost { padding: .55rem .7rem; }
+}
+
+/* 홈 화면에서 실행(standalone)일 때: 주소창이 없으니 상단 여백을 상태바만큼 준다. */
+@media (display-mode: standalone), (display-mode: minimal-ui) {
+  .content { padding-top: calc(3.1rem + env(safe-area-inset-top)); }
+  .sidebar { padding-top: calc(.8rem + env(safe-area-inset-top)); }
+  .sidebar-toggle { top: calc(.7rem + env(safe-area-inset-top)); }
+}
+
+/* 손가락으로 쓰는 기기: 호버 효과를 끄고(터치 후 눌린 상태로 남는다) 탭 하이라이트를 없앤다. */
+@media (hover: none) {
+  a, button { -webkit-tap-highlight-color: transparent; }
+}
+
+/* 모션을 줄이라고 설정한 사용자에게 스플래시 애니메이션을 강요하지 않는다. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+                           transition-duration: .01ms !important; }
 }
