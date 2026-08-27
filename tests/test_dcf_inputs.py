@@ -257,22 +257,45 @@ def test_cost_of_debt_falls_back_to_audit_report_when_api_has_no_data(monkeypatc
 
 
 # ── 영구성장률 ────────────────────────────────────────────────────
-def test_terminal_growth_is_capped_at_risk_free_rate(monkeypatch):
+def test_terminal_growth_returns_recommendation_not_the_cap(monkeypatch):
+    """국채수익률은 g 의 **상한**이지 g 가 아니다.
+
+    예전에는 이 함수가 상한을 그대로 돌려줬고 그 값이 g 로 쓰여서 WACC-g 스프레드가 0.2%p 로
+    좁아지고 TV 가 EV 의 92% 를 차지하는 결과가 나왔다(실측). 이제 value=권장 g,
+    extras.cap=상한 으로 분리한다.
+    """
     from providers import ecos
 
     monkeypatch.setattr(ecos, "risk_free_rate", lambda tenor="10Y": Value(
         4.33, "%", label="국고채10년",
         provenance=Provenance(source="한국은행 ECOS", source_type=SourceType.AUTHORITATIVE,
                               source_url="https://ecos.bok.or.kr", as_of="2026-08-25")))
-    g = dcf_inputs.terminal_growth("KR")
-    assert g.value == 4.33
-    assert "무위험수익률" in g.provenance.note
+    g = dcf_inputs.terminal_growth_cap("KR")
+    assert g.value == dcf_inputs.TERMINAL_G_SUGGESTED["KR"] == 2.0
+    assert g.value < 4.33, "상한을 그대로 g 로 쓰면 안 된다"
+    assert g.extras["cap"].value == 4.33
     assert g.extras["risk_free_rate"].value == 4.33
+    assert "상한을 g 로 쓰면 안 된다" in g.provenance.note
+    # 예전 이름도 같은 값을 돌려준다(호출부 호환)
+    assert dcf_inputs.terminal_growth("KR").value == g.value
+
+
+def test_terminal_growth_cap_never_exceeds_risk_free_rate(monkeypatch):
+    """Rf 가 권장값보다 낮으면 권장값도 함께 내려가야 한다(g <= Rf 원칙 유지)."""
+    from providers import ecos
+
+    monkeypatch.setattr(ecos, "risk_free_rate", lambda tenor="10Y": Value(
+        1.10, "%", label="국고채10년",
+        provenance=Provenance(source="한국은행 ECOS", source_type=SourceType.AUTHORITATIVE,
+                              source_url="https://ecos.bok.or.kr", as_of="2026-08-25")))
+    g = dcf_inputs.terminal_growth_cap("KR")
+    assert g.value == 1.10
+    assert g.value <= g.extras["cap"].value
 
 
 def test_terminal_growth_rejects_unsupported_country():
     with pytest.raises(DataError):
-        dcf_inputs.terminal_growth("DE")
+        dcf_inputs.terminal_growth_cap("DE")
 
 
 # ── 베타 ──────────────────────────────────────────────────────────

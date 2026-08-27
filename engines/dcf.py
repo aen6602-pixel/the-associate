@@ -28,7 +28,7 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
                 terminal_growth_pct: float, forecast_years: int = 5,
                 tax_rate_pct: float | None = None,
                 year: int | None = None, prefer: str = "CFS",
-                market: str = "KR") -> dict:
+                market: str = "KR", allow_mixed: bool = False) -> dict:
     market = (market or "KR").strip().upper()
     provider = _MARKET_PROVIDERS.get(market)
     if provider is None:
@@ -79,6 +79,29 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
                      "capex": cap, "dnwc": dnwc, "ufcf": ufcf, "df": df, "pv": pv})
         prev = rev
 
+    # ── 게이트: 캡티브 금융·순수 금융회사에는 단일 FCFF DCF 를 적용하지 않는다 ──
+    # 연결 IBD·운전자본·부채비중에 금융부문이 섞여 WACC 과대 + EV 과다차감의 이중 왜곡이
+    # 발생한다(현대자동차 실측: 주당 −5,042,055원). 값을 내보내는 것보다 막는 게 정직하다.
+    if market.upper() == "KR" and not allow_mixed:
+        try:
+            from engines import business_mix
+
+            mix = business_mix.classify(company, year, "CFS", deep=False)
+        except Exception:  # noqa: BLE001 — 판정 실패로 계산을 막지는 않는다
+            mix = None
+        if mix and not mix["single_dcf_ok"]:
+            raise DataError(
+                f"{mix['company']}: 단일 FCFF DCF 를 적용할 수 없습니다. {mix['reason']} "
+                + ("근거: " + " / ".join(mix["evidence"]) + " " if mix["evidence"] else "")
+                + ("[대안] 제조부문 세그먼트 재무로 DCF 를 돌리고 금융부문은 P/B 또는 "
+                   "잔여이익으로 별도 평가해 합산하는 SOTP 를 쓰세요. 금융부문 순부채를 "
+                   "제외한 제조부문 순부채를 net_debt 으로 넘기고, 그래도 단일 DCF 를 "
+                   "강행하려면 allow_mixed=True 를 명시해야 합니다(그 경우 결과에 "
+                   "이중 왜곡 경고가 붙습니다)."
+                   if mix["kind"] == "mixed" else
+                   "[대안] 순수 금융회사는 FCFF·EV 개념이 성립하지 않습니다 — P/B·잔여이익·"
+                   "배당할인 또는 compute_comps 의 자기자본배수를 쓰세요."))
+
     ufcf_n = rows[-1]["ufcf"]
     tv = ufcf_n * (1 + gt) / (wacc - gt)
     pv_tv = tv / ((1 + wacc) ** n)
@@ -108,6 +131,23 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     if ev > 0 and pv_tv / ev > 0.9:
         warnings.append(f"EV 의 {pv_tv / ev * 100:.0f}% 가 Terminal Value 입니다 "
                         f"(90% 초과) — 예측기간 가정보다 g·WACC 에 결과가 지배됩니다.")
+    if allow_mixed:
+        warnings.append(
+            "allow_mixed=True 로 금융부문 게이트를 우회했습니다 — WACC 의 부채비중과 EV 의 "
+            "순부채 차감에 금융부문이 섞여 있어 주당가치를 그대로 인용해서는 안 됩니다.")
+
+    # ── 봉인: 여기 걸리면 주당가치를 **숫자로 내보내지 않는다**(NM) ──────────
+    # 지금까지는 LLM 이 사후에 걸러내는 구조였는데, 그건 프롬프트 변화에 취약하다.
+    # 아래 조건은 "기계적으로는 값이 나오지만 밸류에이션으로는 의미가 없는" 상태다.
+    blocking: list[str] = []
+    if len(neg_years) == n:
+        blocking.append(f"예측 {n}개년 UFCF 전부 음수")
+    if ufcf_n <= 0:
+        blocking.append("최종연도 UFCF ≤ 0 (Gordon Growth TV 무의미)")
+    if ev <= 0:
+        blocking.append(f"EV 음수({ev:,.0f})")
+    if equity <= 0:
+        blocking.append(f"지분가치 음수({equity:,.0f})")
 
     name = rev0.label or company
     for suffix in (" 매출액", " Revenue"):
@@ -126,6 +166,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
         "rows": rows, "tv": tv, "pv_tv": pv_tv, "pv_ufcf_sum": pv_sum,
         "ev": ev, "equity_value": equity, "per_share": per_share,
         "warnings": warnings, "valuation_reliable": not warnings,
+        "blocking": blocking, "per_share_is_nm": bool(blocking),
+        "allow_mixed": bool(allow_mixed),
     }
 
 
@@ -136,13 +178,28 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
              ebit_margin_pct: float, da_pct: float, capex_pct: float, nwc_pct: float,
              terminal_growth_pct: float, forecast_years: int = 5,
              tax_rate_pct: float | None = None, year: int | None = None,
-             market: str = "KR") -> Value:
+             market: str = "KR", allow_mixed: bool = False) -> Value:
     d = build_model(company, wacc_pct, net_debt, revenue_growth, ebit_margin_pct,
                     da_pct, capex_pct, nwc_pct, terminal_growth_pct, forecast_years,
-                    tax_rate_pct, year, market=market)
+                    tax_rate_pct, year, market=market, allow_mixed=allow_mixed)
     f = lambda x: f"{x:,.0f}"
     cur = _CURRENCY.get(d["market"], d["market"])
+
+    # ── 기준일(as-of) 정렬 요약 (P1-3) ─────────────────────────────────
+    # 하나의 산출물에 FY 재무 / 최근 시세 / Damodaran 연간 데이터셋이 섞인다. 예전에는
+    # 이 불일치가 note 맨 뒤에 묻혀 있었는데, 기준일은 결과 해석을 바꾸는 정보라 앞에 둔다.
+    _asof = [("기준매출", d["base_revenue"].provenance.as_of),
+             ("발행주식수", d["shares"].provenance.as_of),
+             ("세율", d["tax_prov"].as_of if d.get("tax_prov") else None)]
+    _asof = [(k, v) for k, v in _asof if v]
+    _mixed = len({v for _, v in _asof}) > 1
+    asof_line = ("[기준일] " + ", ".join(f"{k} {v}" for k, v in _asof)
+                 + (" ⚠️ 기준일이 서로 다릅니다 — WACC·순부채의 기준일까지 포함해 "
+                    "Valuation Date 를 하나로 정하고 이탈 항목을 보고서 상단에 밝히세요."
+                    if _mixed else "") + " ")
+
     note = (
+        asof_line +
         f"[DCF · UFCF · ⚠️ 성장·마진 등은 사용자 가정] 기준매출 {f(d['base_revenue'].value)}"
         f"({d['base_revenue'].provenance.source}, {d['as_of']}), "
         f"발행주식 {d['shares'].value:,}주. WACC {d['wacc_pct']}%, terminal g {d['terminal_growth_pct']}%, "
@@ -152,6 +209,10 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
     )
     if d["warnings"]:
         note += " ⚠️ [검증 경고] " + " | ".join(d["warnings"])
+    if d["per_share_is_nm"]:
+        note = ("⛔ [산출 불가 · NM] " + ", ".join(d["blocking"])
+                + " → 이 입력 조합의 주당가치는 밸류에이션으로 해석할 수 없어 값을 반환하지 "
+                  "않습니다(EV·지분가치는 진단용으로만 extras 에 남깁니다). " + note)
     def _computed(label: str, val: float, src_url: str, extra_note: str) -> Value:
         return Value(
             value=round(val), unit=cur, label=f"{d['company']} {label}",
@@ -167,8 +228,10 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
                              f"EV {f(d['ev'])} − 순부채 {f(d['net_debt'])} = 지분가치 {f(d['equity_value'])}")
 
     return Value(
-        value=round(d["per_share"]), unit=f"{cur}/주",
-        label=f"{d['company']} DCF 주당가치",
+        value=None if d["per_share_is_nm"] else round(d["per_share"]),
+        unit=f"{cur}/주",
+        label=(f"{d['company']} DCF 주당가치 (산출 불가·NM)" if d["per_share_is_nm"]
+               else f"{d['company']} DCF 주당가치"),
         provenance=Provenance(source="계산엔진(engines.dcf)", source_type=SourceType.COMPUTED,
                               source_url="(computed: DART 매출/주식수 + 사용자 가정 + WACC)",
                               as_of=d["as_of"], note=note),

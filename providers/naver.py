@@ -122,6 +122,64 @@ def price_series(stock_code: str, period: str = "week", years: int = 5) -> list[
     return _chart(f"item/{stock_code}", period, years)
 
 
+def close_on_or_before(stock_code: str, target: str | None = None,
+                       name: str | None = None) -> Value:
+    """target(YYYYMMDD) 이하의 가장 가까운 거래일 종가. 미지정 시 최신 거래일.
+
+    통합 API 의 closePrice 는 응답에 없을 때가 있어(실측 2026-08: 삼성전자·SK하이닉스
+    모두 키 부재) 일별 차트 시계열에서 뽑는다.
+    """
+    years = 1
+    if target:
+        from datetime import date
+
+        years = max(1, min(10, date.today().year - int(str(target)[:4]) + 1))
+    series = price_series(stock_code, "day", years)
+    rows = [x for x in series if not target or x["date"] <= str(target)]
+    if not rows:
+        raise DataError(f"{stock_code}: {target} 이전 거래일 종가가 없습니다 "
+                        f"(가용 최초 {series[0]['date']}).")
+    row = rows[-1]
+    return Value(
+        row["close"], "KRW", label=f"{name or stock_code} 종가 ({row['date']})",
+        provenance=Provenance(
+            source="네이버 금융(KRX 시세)", source_type=SourceType.AUTHORITATIVE,
+            source_url=f"https://m.stock.naver.com/domestic/stock/{stock_code}/total",
+            original_field="chart/domestic/item closePrice", as_of=row["date"],
+            note=f"일별 종가 시계열에서 {target or '최신'} 이하 최근 거래일 종가",
+        ),
+    )
+
+
+def implied_common_shares(stock_code: str, name: str | None = None) -> Value:
+    """KRX 시가총액 ÷ 최근 종가 = **유통 보통주식수**(내재).
+
+    DART 의 발행주식총수를 시가총액 계산에 쓰면 안 된다(실측 2026-08-27):
+      삼성전자  DART 8,975,138,200주(보통 7,780,466,850 + 우선 1,194,671,350)
+                vs KRX 시총÷종가 5,835,247,925주  → +53.8% 과대
+      SK하이닉스 DART 5,721,980,209주 vs KRX 내재 730,492,379주 → +683% 과대
+    DART '주식총수현황' 은 **발행한 주식의 누적 총수**(우선주·소각분 포함)라서 유통
+    보통주식수와 다르다. 시가총액은 거래소가 이미 보통주 기준으로 계산해 주므로,
+    그 시총을 종가로 되나눠 주식수를 역산하는 쪽이 항상 자기일관적이다.
+    이 주식수는 과거 기준일 시총을 `내재주식수 × 그 날 종가` 로 환산할 때 쓴다.
+    """
+    mv = market_cap(stock_code, name)
+    px = close_on_or_before(stock_code, None, name)
+    shares = mv.value / px.value
+    return Value(
+        round(shares), "주", label=f"{name or stock_code} 내재 유통보통주식수",
+        provenance=Provenance(
+            source="계산(KRX 시가총액 ÷ 종가)", source_type=SourceType.COMPUTED,
+            source_url=mv.provenance.source_url,
+            original_field="marketValue / closePrice", as_of=px.provenance.as_of,
+            note=(f"KRX 시가총액 {mv.value:,} ÷ 종가({px.provenance.as_of}) "
+                  f"{px.value:,.0f} = {shares:,.0f}주. DART 발행주식총수(우선주·누적발행 "
+                  f"포함)와 다르며, 시가총액 계산에는 이 값을 쓴다."),
+        ),
+        extras={"market_cap": mv, "price": px},
+    )
+
+
 def index_series(index: str = "KOSPI", period: str = "week", years: int = 5) -> list[dict]:
     """시장지수 종가 시계열. index: KOSPI | KOSDAQ."""
     idx = (index or "KOSPI").strip().upper()

@@ -140,6 +140,9 @@ def bootstrap(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
         engines.append({
             "provider": key, "label": p["label"], "default_model": p["default_model"],
             "presets": p["presets"], "connected": bool(info["key"]), "key_name": info["key_name"],
+            # 추론강도(reasoning effort) — provider 마다 받을 수 있는 값이 다르다.
+            "reasoning_levels": info["reasoning_levels"],
+            "default_reasoning": info["default_reasoning"],
         })
 
     def _src(s: dict) -> dict:
@@ -161,6 +164,7 @@ def bootstrap(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
             "provider": config.LLM_PROVIDER if any(
                 e["provider"] == config.LLM_PROVIDER for e in engines) else engines[0]["provider"],
         },
+        "reasoning_labels": config.REASONING_LABELS,
         "sources": [_src(s) for s in sources.SOURCES],
         "roadmap": [{"name": r["name"], "org": r["org"], "provides": r["provides"]}
                     for r in sources.ROADMAP],
@@ -211,6 +215,7 @@ class AskBody(BaseModel):
     session_id: str | None = None
     provider: str | None = None
     model: str | None = None
+    reasoning: str | None = None
 
 
 def _sse(event: dict) -> str:
@@ -225,6 +230,13 @@ def ask(body: AskBody, viewer: auth.Viewer = Depends(current_viewer)) -> Streami
     if config.DEPLOY_MODE and config.LLM_PROVIDERS[provider].get("auth_mode") == "cli":
         raise HTTPException(status_code=400,
                             detail="이 두뇌(claude CLI)는 배포 환경에서 쓸 수 없습니다.")
+    # 추론강도는 provider 별로 받을 수 있는 값이 달라 조용히 무시하지 않고 400 으로 거른다
+    # (무시하면 사용자가 "높음" 을 골랐는데 기본값으로 돈 것을 알 방법이 없다).
+    if not config.is_valid_reasoning(provider, body.reasoning):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{provider} 가 지원하지 않는 추론강도: {body.reasoning} "
+                    f"(지원: {', '.join(config.reasoning_levels(provider)) or '없음'})"))
 
     sid = body.session_id or hist.new_session_id()
     rec = hist.load_session(sid, viewer.key) or {}
@@ -237,7 +249,8 @@ def ask(body: AskBody, viewer: auth.Viewer = Depends(current_viewer)) -> Streami
         final_text = ""
         try:
             for ev in brain.answer(question, history=prior,
-                                   provider=provider, model=body.model):
+                                   provider=provider, model=body.model,
+                                   reasoning=body.reasoning):
                 kind = ev.get("type")
                 if kind == "tool_result":
                     trace.append({"name": ev["name"], "input": ev["input"],

@@ -20,9 +20,12 @@ def _assume(note: str) -> Provenance:
 
 
 def sangjeung_workbook(company: str, year: int | None = None,
-                       real_estate_heavy: bool = False, report: str = "annual") -> tuple[bytes, str]:
+                       real_estate_heavy: bool | None = None, report: str = "annual",
+                       nav_only: bool | None = None, largest_shareholder: bool = False,
+                       sme: bool = False) -> tuple[bytes, str]:
     """상증법 보충적평가 워크북 생성 → (xlsx bytes, 파일명)."""
-    m = sangjeung.build_model(company, year, real_estate_heavy, report)
+    m = sangjeung.build_model(company, year, real_estate_heavy, report, nav_only,
+                              largest_shareholder, sme)
     s = m["ni_series"]
     wb = ValuationWorkbook("상증법 평가")
 
@@ -171,70 +174,145 @@ def dcf_workbook(company: str, wacc_pct: float, net_debt: float, revenue_growth,
     return wb.to_bytes(), fname
 
 
-def comps_workbook(target: str, peers: list, year: int | None = None) -> tuple[bytes, str]:
-    """Trading comps 워크북 → (xlsx bytes, 파일명). 배수·적용은 수식."""
-    m = comps.build_model(target, peers, year)
-    wb = ValuationWorkbook("Comps")
-    wb.title(1, f"Trading Comps (자기자본배수) — {m['target']} ({m['as_of']})",
-             "⚠️ PER·PBR 배수. 시가총액=네이버(KRX), 순이익·자본총계=DART. EV배수는 추후.")
+def comps_workbook(companies: list, target: str | None = None, market: str = "KR",
+                   as_of: str | None = None, basis: str = "LTM",
+                   display_currency: str = "USD") -> tuple[bytes, str]:
+    """Trading comps 워크북 → (xlsx bytes, 파일명).
 
-    wb.section(3, "Peer 배수 (PER=시총/순이익, PBR=시총/자본)")
+    원자료(파란 입력셀)와 배수(수식)를 분리해서, 사용자가 시총·EBITDA 를 바꾸면 배수와
+    median 이 다시 계산되게 만든다. 기준일·기준기간·통화·정의 차이는 표 위/아래에 그대로 적는다.
+    """
+    m = comps.build_model(companies, target, market, as_of, basis, display_currency)
+    rows = m["rows"]
+    wb = ValuationWorkbook("Comps")
+    d = m["price_date"]
+    wb.title(1, f"Trading Comps — {len(rows)}개사 ({d} 종가 기준, 분모 {m['basis_requested']})",
+             f"시가총액 = 공통 거래일({d}) 종가 × 유통 보통주식수 / "
+             f"EV = 시가총액 + 순부채 / 절대금액 표시통화 {m['display_currency']} "
+             f"(배수는 통화중립이라 환산하지 않음)")
+
+    cols = ["회사", "시장", "통화", "기준기간", "시가총액", "순부채", "EV",
+            "EBIT", "D&A", "EBITDA", "매출", "당기순이익", "자본총계",
+            "EV/EBITDA", "EV/EBIT", "EV/Revenue", "P/E", "P/B"]
+    wb.section(3, "비교기업 원자료와 배수 (현지통화)")
     hdr = 4
-    for c, t in enumerate(["회사", "시가총액", "당기순이익", "자본총계", "PER(x)", "PBR(x)"], 1):
+    for c, t in enumerate(cols, 1):
         wb.put(hdr, c, t, bold=True)
-    mc_prov = Provenance(source="네이버 금융(KRX 시세)", source_type=SourceType.AUTHORITATIVE,
-                         source_url="https://m.stock.naver.com", original_field="시가총액")
-    dart_prov = Provenance(source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
-                           source_url="https://dart.fss.or.kr", original_field="당기순이익·자본총계")
+
     r = hdr + 1
     first = r
-    for p in m["peers"]:
-        wb.put(r, 1, f"{p['name']} ({p['stock_code']})")
-        wb.icell(r, 2, p["market_cap"], mc_prov, src_label=f"{p['name']} 시총")
-        wb.icell(r, 3, p["net_income"], dart_prov, src_label=f"{p['name']} 순이익")
-        wb.icell(r, 4, p["equity"], dart_prov, src_label=f"{p['name']} 자본")
-        if p["per"]:
-            wb.fcell(r, 5, f"=B{r}/C{r}", fmt="0.0")
+    for row in rows:
+        wb.put(r, 1, row["name"])
+        wb.put(r, 2, row["market"])
+        wb.put(r, 3, row["currency"])
+        wb.put(r, 4, row["basis"].get("ebitda") or row["basis"].get("ebit") or "?")
+
+        def cell(col: int, key: str):
+            v = row["values"].get(key)
+            if v is None:
+                wb.put(r, col, "미확보")
+                return None
+            return wb.icell(r, col, v.value, v.provenance, src_label=f"{row['name']} {key}")
+
+        b_mc = cell(5, "market_cap")
+        b_nd = cell(6, "net_debt")
+        if b_mc and b_nd:
+            wb.fcell(r, 7, f"=E{r}+F{r}")
         else:
-            wb.put(r, 5, "n/a")
-        if p["pbr"]:
-            wb.fcell(r, 6, f"=B{r}/D{r}", fmt="0.00")
+            wb.put(r, 7, "미확보")
+        b_ebit = cell(8, "ebit")
+        b_da = cell(9, "da")
+        if b_ebit and b_da:
+            wb.fcell(r, 10, f"=H{r}+I{r}")
         else:
-            wb.put(r, 6, "n/a")
+            wb.put(r, 10, "미확보")
+        cell(11, "revenue")
+        cell(12, "net_income")
+        cell(13, "equity")
+
+        # 배수는 수식 — 위 원자료 셀을 바꾸면 같이 움직인다. NM 은 사유를 셀에 남긴다.
+        for col, key, num, den in ((14, "ev_ebitda", f"G{r}", f"J{r}"),
+                                   (15, "ev_ebit", f"G{r}", f"H{r}"),
+                                   (16, "ev_revenue", f"G{r}", f"K{r}"),
+                                   (17, "per", f"E{r}", f"L{r}"),
+                                   (18, "pbr", f"E{r}", f"M{r}")):
+            if row["multiples"].get(key) is not None:
+                wb.fcell(r, col, f"={num}/{den}", fmt="0.00")
+            elif key in row["nm"]:
+                wb.put(r, col, "NM")
+            else:
+                wb.put(r, col, "미확보")
         r += 1
     last = r - 1
-    wb.put(r, 1, "중앙값 (median)", bold=True)
-    b_per = wb.fcell(r, 5, f"=MEDIAN(E{first}:E{last})", fmt="0.0", bold=True)
-    b_pbr = wb.fcell(r, 6, f"=MEDIAN(F{first}:F{last})", fmt="0.00", bold=True)
-    med_row = r
 
-    r += 2
-    wb.section(r, "타깃 적용 → 주당가치")
-    r += 1
-    wb.put(r, 1, f"타깃: {m['target']}")
-    r += 1
-    wb.put(r, 1, "당기순이익")
-    b_ni = wb.icell(r, 2, m["ni_t"].value, m["ni_t"].provenance, src_label="타깃 순이익")
-    r += 1
-    wb.put(r, 1, "자본총계")
-    b_eq = wb.icell(r, 2, m["eq_t"].value, m["eq_t"].provenance, src_label="타깃 자본")
-    r += 1
-    wb.put(r, 1, "발행주식총수")
-    b_sh = wb.icell(r, 2, m["shares_t"].value, m["shares_t"].provenance, src_label="타깃 주식수")
-    r += 1
-    wb.put(r, 1, "▶ 주당가치 (PER 기준)")
-    wb.fcell(r, 2, f"={b_ni}*{b_per}/{b_sh}", bold=True)
-    r += 1
-    wb.put(r, 1, "▶ 주당가치 (PBR 기준)")
-    wb.fcell(r, 2, f"={b_eq}*{b_pbr}/{b_sh}", bold=True)
+    for stat, label, fn in (("median", "중앙값 (median)", "MEDIAN"),
+                            ("mean", "평균 (mean)", "AVERAGE"),
+                            ("min", "최소", "MIN"), ("max", "최대", "MAX")):
+        wb.put(r, 1, label, bold=(stat == "median"))
+        for col in range(14, 19):
+            letter = chr(ord("A") + col - 1)
+            wb.fcell(r, col, f"={fn}({letter}{first}:{letter}{last})", fmt="0.00",
+                     bold=(stat == "median"))
+        if stat == "median":
+            med_row = r
+        r += 1
 
+    r += 1
+    wb.section(r, f"표시통화 환산 ({m['display_currency']})")
+    r += 1
+    for c, t in enumerate(["회사", "환율", "시가총액", "순부채", "EV", "EBITDA"], 1):
+        wb.put(r, c, t, bold=True)
+    r += 1
+    for row in rows:
+        wb.put(r, 1, row["name"])
+        wb.put(r, 2, row.get("fx_rate") if row.get("fx_rate") is not None else "환산불가")
+        for c, key in ((3, "market_cap"), (4, "net_debt"), (5, "ev"), (6, "ebitda")):
+            v = (row.get("display") or {}).get(key)
+            wb.put(r, c, round(v) if v is not None else "미확보")
+        r += 1
+
+    if m["target"]:
+        t = m["target"]
+        r += 1
+        wb.section(r, f"타깃 적용 → 내재가치 ({t['name']}, {t['currency']})")
+        r += 1
+        for c, h in enumerate(["기준 배수", "median(x)", "분모", "내재 EV",
+                               "내재 지분가치", "주당가치"], 1):
+            wb.put(r, c, h, bold=True)
+        r += 1
+        for key, label, *_ in comps.MULTIPLES:
+            imp = t["implied"].get(key)
+            wb.put(r, 1, label)
+            if not imp:
+                wb.put(r, 2, "산출 불가")
+                r += 1
+                continue
+            wb.put(r, 2, round(imp["multiple"], 2))
+            wb.put(r, 3, round(imp["denominator"]))
+            wb.put(r, 4, round(imp["ev"]) if imp["ev"] is not None else "-")
+            wb.put(r, 5, round(imp["equity_value"]))
+            wb.put(r, 6, round(imp["per_share"]) if imp["per_share"] else "주식수 미확보")
+            r += 1
+
+    r += 1
+    for w in m["warnings"]:
+        wb.note(r, "⚠️ " + w)
+        r += 1
+    for row in rows:
+        for k, why in row["missing"].items():
+            wb.note(r, f"미확보 {row['name']}.{k}: {why}")
+            r += 1
+        for k, why in row["nm"].items():
+            wb.note(r, f"NM {row['name']}.{k}: {why}")
+            r += 1
     if m["errors"]:
-        r += 2
-        wb.note(r, "제외된 peer: " + " / ".join(m["errors"]))
-    r += 1
-    wb.note(r, "PER 기준은 이익, PBR 기준은 순자산 관점. 두 값의 범위를 함께 보세요. 배수 셀은 수식이라 입력 변경 시 flex.")
+        wb.note(r, "제외된 회사: " + " / ".join(m["errors"]))
+        r += 1
+    wb.note(r, "배수 셀은 수식입니다 — 원자료(파란 셀)를 고치면 배수와 median 이 다시 계산됩니다. "
+               "여러 배수를 단순 평균하지 말고 주 배수와 보조 배수를 구분해 쓰세요.")
 
-    fname = f"Comps_{m['target']}_{m['as_of']}.xlsx".replace("/", "_")
+    stem = (m["target"]["name"] if m["target"] else f"{len(rows)}개사")
+    fname = f"Comps_{stem}_{d}.xlsx".replace("/", "_")
     return wb.to_bytes(), fname
 
 

@@ -19,6 +19,8 @@
 [두뇌]  agent/brain.py ── LLM tool-use: 어떤 도구를, 어떤 인자로 부를지만 결정
 ──────────────────────────────────────────────────────────
 [engines]   wacc / comps / 상증법 / dcf          ── 계산 (결정론 코드)
+            business_mix                       ── 적용 판단(단일 DCF / SOTP / 지분평가)
+            market_data                        ── 시장 중립 계층(KR·US·JP·TW 공통)
 [providers] dart / ecos / fred / naver / damodaran / sec / edinet / finmind / fx
 [core]      schema(=Provenance) / config / auth / history / markdown / http
 ```

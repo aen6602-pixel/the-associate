@@ -21,7 +21,8 @@ from server.main import (_BUILDER_ALIASES, _XLSX_EXPORTS, XLSX_MIME,
 DCF_INPUT = {"company": "오리온", "wacc_pct": 8.0, "net_debt": -275874909483,
              "revenue_growth_pct": 9.32, "ebit_margin_pct": 16.65, "da_pct": 5.31,
              "capex_pct": 4.72, "nwc_pct": 20.0, "terminal_growth_pct": 4.32}
-COMPS_INPUT = {"target": "SK하이닉스", "peers": ["삼성전자"]}
+COMPS_INPUT = {"companies": ["삼성전자", "SK하이닉스", "MU:US", "2330:TW"],
+               "basis": "LTM", "display_currency": "USD"}
 SANG_INPUT = {"company": "에스케이트리켐"}
 
 

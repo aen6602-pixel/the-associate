@@ -60,20 +60,57 @@ def test_overseas_without_industry_gives_actionable_error(monkeypatch, market_in
     assert "한국 기업 전용" in msg and "industry" in msg
 
 
-def test_domestic_still_uses_disclosure_paths(monkeypatch, market_inputs):
+def test_domestic_uses_market_kd_not_effective_kd(monkeypatch, market_inputs):
+    """국내 기본 Kd 는 **시장**(ECOS 등급별 회사채)이다.
+
+    실효 Kd(이자비용/차입금)는 과거 조달금리의 가중평균이라 저금리 조달분이 남아 있으면
+    무위험수익률보다 낮아진다(SK하이닉스 실측 3.79% < Rf 4.288% -> 신용스프레드 음수).
+    """
     from engines import beta as beta_engine, dcf_inputs
 
     used = []
     monkeypatch.setattr(beta_engine, "beta_for",
                         lambda *a, **k: _val(1.18, "배", src="네이버 금융(KRX 시세)"))
-    monkeypatch.setattr(dcf_inputs, "cost_of_debt",
-                        lambda *a, **k: (used.append("kd"), _val(1.95))[1])
-    monkeypatch.setattr(wacc_engine, "market_debt_to_value",
-                        lambda *a, **k: (used.append("dv"), _val(0.0158, "비율"))[1])
+    monkeypatch.setattr(dcf_inputs, "market_cost_of_debt",
+                        lambda *a, **k: (used.append("market_kd"), _val(4.5))[1])
+    monkeypatch.setattr(dcf_inputs, "cost_of_debt", lambda *a, **k: pytest.fail(
+        "시장 Kd 가 되는데 실효 Kd 를 기본으로 쓰면 안 된다"))
+    monkeypatch.setattr(wacc_engine, "market_debt_to_value", lambda *a, **k: pytest.fail(
+        "기본 경로에서 spot 레버리지를 target 으로 쓰면 안 된다"))
 
-    v = wacc_engine.compute_wacc_auto("삼성전자")
-    assert used == ["kd", "dv"], "국내 기업은 공시·시세 경로를 그대로 써야 한다"
-    assert "공시 이자비용" in v.provenance.note
+    v = wacc_engine.compute_wacc_auto("삼성전자", industry="Semiconductor")
+    assert used == ["market_kd"]
+    assert "ECOS 등급별 회사채" in v.provenance.note
+    assert "산업 median" in v.provenance.note, "target 자본구조는 산업 median 이 기본"
+
+
+def test_domestic_falls_back_to_effective_kd_when_market_kd_fails(
+        monkeypatch, market_inputs):
+    """시장 Kd 조회가 실패하면 실효 Kd 로 폴백하되 그 사실을 note 에 남긴다."""
+    from engines import beta as beta_engine, dcf_inputs
+
+    def _boom(*a, **k):
+        raise DataError("ECOS 장애")
+
+    monkeypatch.setattr(beta_engine, "beta_for", lambda *a, **k: _val(1.18, "배"))
+    monkeypatch.setattr(dcf_inputs, "market_cost_of_debt", _boom)
+    monkeypatch.setattr(dcf_inputs, "cost_of_debt", lambda *a, **k: _val(1.95))
+
+    v = wacc_engine.compute_wacc_auto("삼성전자", industry="Semiconductor")
+    assert "실효" in v.provenance.note and "시장 Kd 조회 실패" in v.provenance.note
+
+
+def test_spot_leverage_is_opt_in_and_labeled_as_such(monkeypatch, market_inputs):
+    """spot 을 쓰려면 명시해야 하고, target 이 아니라고 표기돼야 한다."""
+    from engines import beta as beta_engine, dcf_inputs
+
+    monkeypatch.setattr(beta_engine, "beta_for", lambda *a, **k: _val(1.18, "배"))
+    monkeypatch.setattr(dcf_inputs, "market_cost_of_debt", lambda *a, **k: _val(4.5))
+    monkeypatch.setattr(wacc_engine, "market_debt_to_value",
+                        lambda *a, **k: _val(0.0188, "비율"))
+
+    v = wacc_engine.compute_wacc_auto("삼성전자", debt_ratio_source="spot")
+    assert "spot" in v.provenance.note and "target 아님" in v.provenance.note
 
 
 def test_market_defaults_to_country(monkeypatch, market_inputs):

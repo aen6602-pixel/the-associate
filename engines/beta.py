@@ -26,6 +26,12 @@ def _returns(series: list[dict]) -> dict[str, float]:
     return out
 
 
+# 회귀베타를 자본비용에 쓸 수 있는 최소 설명력. 실측 관측치: SK하이닉스 R²=0.561(사용 가능),
+# 현대자동차 R²=0.3822(경계). 0.3 미만이면 "시장과 같이 움직인다" 는 전제가 성립하지 않아
+# 그 베타로 만든 CAPM 은 근거가 없다 → 산업베타로 강제 전환한다.
+R2_MIN = 0.3
+
+
 def _ols(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
     """(기울기, 절편, R²). 외부 의존성 없이 계산."""
     n = len(xs)
@@ -87,7 +93,10 @@ def regression_beta(company: str, period: str = "week", years: int = 5,
     beta, _, r2 = _ols(xs, ys)
 
     warn = ""
-    if r2 < 0.1:
+    if r2 < R2_MIN:
+        warn = (f" ⚠️ R² {r2:.3f} < {R2_MIN} — 시장과의 설명력이 부족해 이 회귀베타는 "
+                f"자본비용에 쓰지 않는 것이 맞습니다(산업베타 사용 권장).")
+    elif r2 < 0.1:
         warn = f" ⚠️ R² {r2:.3f} 가 낮아 시장과의 설명력이 약함 — 산업베타 병행 검토 권장."
     return Value(
         round(beta, 4), "배", label=f"{name} 레버드베타(회귀)",
@@ -161,10 +170,31 @@ def beta_for(company: str, industry: str | None = None, country: str = "KR",
     market 를 안 주면 country 를 시장으로 본다(KR→네이버/KOSPI, 그 외→Yahoo)."""
     mkt = (market or country or "KR").strip().upper()
     try:
-        return regression_beta(company, period, years, index, mkt, symbol)
+        reg = regression_beta(company, period, years, index, mkt, symbol)
     except DataError as e:
         if industry is None:
             raise DataError(f"{e} (industry 를 함께 주면 산업베타로 대체 계산할 수 있습니다.)")
         v = industry_beta(industry, country)
         v.provenance.note = f"회귀베타 불가({e}) → 산업베타 사용. " + (v.provenance.note or "")
         return v
+
+    # ── R² 게이팅 ────────────────────────────────────────────────────────
+    # 설명력이 부족한 회귀베타는 "값이 나왔다" 는 것 말고는 근거가 없다. industry 가 있으면
+    # 산업베타로 갈아타고, 없으면 값은 주되 경고를 최상위 note 로 올린다(조용히 쓰이지 않게).
+    r2v = (reg.extras or {}).get("r_squared")
+    r2 = r2v.value if r2v else None
+    if r2 is not None and r2 < R2_MIN:
+        if industry:
+            v = industry_beta(industry, country)
+            v.provenance.note = (
+                f"⚠️ 회귀베타 R² {r2:.3f} < {R2_MIN} 로 설명력이 부족해 **산업베타로 전환**했습니다"
+                f"(회귀베타 {reg.value} 는 참고용으로 extras 에 남깁니다). "
+                + (v.provenance.note or ""))
+            v.extras = dict(v.extras or {})
+            v.extras["regression_beta_rejected"] = reg
+            return v
+        reg.provenance.note = (
+            f"⚠️ [저신뢰] R² {r2:.3f} < {R2_MIN} — 이 회귀베타를 자본비용에 쓰면 근거가 약합니다. "
+            f"industry(Damodaran 산업명)를 함께 넘기면 산업베타로 자동 전환됩니다. "
+            + (reg.provenance.note or ""))
+    return reg

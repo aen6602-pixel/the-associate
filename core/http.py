@@ -62,16 +62,37 @@ def get_bytes(url: str, ttl_hours: float = 24 * 7, headers: dict | None = None,
 
 
 def get_json(url: str, ttl_hours: float = 6, headers: dict | None = None,
-             params: dict | None = None, timeout: int = 30) -> dict:
-    """캐시된 GET(JSON). API 호출용."""
+             params: dict | None = None, timeout: int = 30,
+             is_empty=None, empty_ttl_hours: float = 1.0) -> dict:
+    """캐시된 GET(JSON). API 호출용.
+
+    is_empty: 응답이 '데이터 없음' 인지 판정하는 콜백. 빈 응답은 **짧게만**(empty_ttl_hours)
+      캐시한다. 왜 필요한가 — DART 는 아직 접수되지 않은 사업연도를 물으면
+      {"status":"013","message":"조회된 데이타가 없습니다"} 를 준다. 이걸 3일 캐시하면
+      보고서가 접수된 뒤에도 최대 3일간 "그 연도 데이터 없음" 을 계속 믿게 되고,
+      '최신 사업연도' 판정이 그만큼 늦어진다(리노공업 FY2025 사례).
+    """
     import json
 
     full = url
     if params:
         full += "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     cp = _cache_path(full, ".json")
-    if cp.exists() and (time.time() - cp.stat().st_mtime) < ttl_hours * 3600:
-        return json.loads(cp.read_text(encoding="utf-8"))
+    if cp.exists():
+        age = time.time() - cp.stat().st_mtime
+        cached = None
+        if age < max(ttl_hours, empty_ttl_hours) * 3600:
+            cached = json.loads(cp.read_text(encoding="utf-8"))
+        if cached is not None:
+            limit = ttl_hours
+            if is_empty is not None:
+                try:
+                    if is_empty(cached):
+                        limit = empty_ttl_hours
+                except Exception:  # noqa: BLE001 — 판정 실패는 일반 TTL 로 처리
+                    pass
+            if age < limit * 3600:
+                return cached
     r = session().get(url, headers=headers, params=params, timeout=timeout)
     try:
         r.raise_for_status()

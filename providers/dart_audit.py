@@ -11,7 +11,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from functools import lru_cache
+from core.cache import TTL_FRESH, TTL_INDEX, ttl_cache
 
 from core.schema import DataError
 from core.http import get_json, session
@@ -108,7 +108,7 @@ def _cells(tr: str) -> list[str]:
     return [re.sub(r"<[^>]+>", "", c).replace("\xa0", " ").strip() for c in raw]
 
 
-@lru_cache(maxsize=32)
+@ttl_cache(TTL_INDEX, maxsize=32)
 def _report_text(rcept: str) -> str:
     key = config.require(config.Keys.DART, "DART_API_KEY")
     r = session().get(f"{_BASE}/document.xml",
@@ -125,7 +125,7 @@ def _rows(rcept: str) -> list[list[str]]:
     return [_cells(t) for t in re.findall(r"<TR[^>]*>(.*?)</TR>", text, re.S | re.I)]
 
 
-@lru_cache(maxsize=64)
+@ttl_cache(TTL_FRESH, maxsize=64)   # 새 감사보고서 접수를 반영해야 한다
 def _audit_reports(corp_code: str) -> tuple:
     """corp_code → ((year, rcept), ...) 별도 감사보고서, 연도 내림차순."""
     key = config.require(config.Keys.DART, "DART_API_KEY")

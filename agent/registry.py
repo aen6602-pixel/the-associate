@@ -13,15 +13,25 @@ from core import skills as skills_lib
 from providers import damodaran, fx, ecos, fred, dart, sec, edinet, finmind, openfigi, mops
 from engines import (wacc as wacc_engine, sangjeung as sangjeung_engine,
                      dcf as dcf_engine, comps as comps_engine,
-                     dcf_inputs as dcf_inputs_engine, beta as beta_engine)
+                     dcf_inputs as dcf_inputs_engine, beta as beta_engine,
+                     market_data, business_mix)
 
 _ITEM_ENUM = ["revenue", "operating_income", "net_income",
              "total_assets", "total_liabilities", "total_equity",
-             "cash", "ppe", "inventories", "trade_receivables", "trade_payables"]
+             "cash", "ppe", "inventories", "trade_receivables", "trade_payables", "da"]
 _ITEM_DESC = ("항목: revenue(매출액), operating_income(영업이익), net_income(당기순이익), "
              "total_assets(자산총계), total_liabilities(부채총계), total_equity(자본총계), "
              "cash(현금및현금성자산), ppe(유형자산), inventories(재고자산), "
-             "trade_receivables(매출채권), trade_payables(매입채무).")
+             "trade_receivables(매출채권), trade_payables(매입채무), "
+             "da(감가상각비+무형자산상각비 — EBITDA = operating_income + da).")
+# 일본(EDINET)은 유가증권보고서 XBRL 에서 핵심 6항목만 매핑돼 있다. 도구 설명이 지원하지
+# 않는 항목을 광고하면 LLM 이 "데이터가 없다" 로 오해하고 포기한다 — 시장별로 실제 지원
+# 범위를 그대로 적는다.
+_ITEM_ENUM_JP = ["revenue", "operating_income", "net_income",
+                 "total_assets", "total_liabilities", "total_equity"]
+_ITEM_DESC_JP = ("항목: revenue(매출액), operating_income(영업이익), net_income(당기순이익), "
+                 "total_assets(자산총계), total_liabilities(부채총계), total_equity(자본총계). "
+                 "일본은 이 6개만 지원한다(현금·D&A 는 EDINET XBRL 매핑이 없음).")
 
 # ── tool 이름 → (실행 함수, Claude 스키마) ──────────────────────────────────
 
@@ -50,6 +60,10 @@ def _wacc(country: str, beta: float, cost_of_debt_pct: float,
     return wacc_engine.compute_wacc(country, beta, cost_of_debt_pct, debt_to_value, tenor)
 
 def _fin_item(company: str, item: str, year: int | None = None, report: str = "annual") -> Value:
+    # D&A 는 손익계산서 계정이 아니라 현금흐름표(없으면 성격별 분류 주석)에서 나온다 —
+    # 별도 경로가 필요해 ITEM_MAP 에 없고, 그래서 예전에는 어떤 도구로도 뽑을 수 없었다.
+    if item == "da":
+        return dart.da_best(company, _pos(year), report)
     return dart.financial_item(company, item, year, report)
 
 def _search_filings(corp: str, bgn_de: str, end_de: str, kw: str | None = None) -> Value:
@@ -144,21 +158,107 @@ def _figi(id_type: str, id_value: str, exch_code: str | None = None) -> Value:
     return openfigi.figi(id_type, id_value, exch_code)
 
 def _sangjeung(company: str, year: int | None = None,
-               real_estate_heavy: bool = False, report: str = "annual") -> Value:
-    return sangjeung_engine.evaluate(company, year, real_estate_heavy, report)
+               real_estate_heavy: bool | None = None, report: str = "annual",
+               nav_only: bool | None = None, largest_shareholder: bool = False,
+               sme: bool = False) -> Value:
+    return sangjeung_engine.evaluate(company, _pos(year), real_estate_heavy, report,
+                                     nav_only, bool(largest_shareholder), bool(sme))
 
 def _dcf(company: str, wacc_pct: float, net_debt: float, revenue_growth_pct: float,
          ebit_margin_pct: float, da_pct: float, capex_pct: float, nwc_pct: float,
          terminal_growth_pct: float, forecast_years: int = 5,
          tax_rate_pct: float | None = None, year: int | None = None,
-         market: str = "KR") -> Value:
+         market: str = "KR", allow_mixed: bool = False) -> Value:
     return dcf_engine.evaluate(company, wacc_pct, net_debt, revenue_growth_pct,
                                ebit_margin_pct, da_pct, capex_pct, nwc_pct,
                                terminal_growth_pct, forecast_years, tax_rate_pct, year,
-                               market)
+                               market, bool(allow_mixed))
 
-def _comps(target: str, peers: list, year: int | None = None) -> Value:
-    return comps_engine.evaluate(target, peers, year)
+def _comps(companies: list, target: str | None = None, market: str = "KR",
+           as_of: str | None = None, basis: str = "LTM",
+           display_currency: str = "USD") -> Value:
+    return comps_engine.evaluate(companies, _blank(target), _blank(market) or "KR",
+                                 _blank(as_of), _blank(basis) or "LTM",
+                                 _blank(display_currency) or "USD")
+
+
+def _fin_history(company: str, item: str, years: int = 3, market: str = "KR") -> Value:
+    """최근 N개 회계연도 시계열. **연도를 인자로 받지 않는다** — 각 시장 provider 가
+    '실제로 데이터가 있는 최신 회계연도' 를 찾고 거기서 내려온다."""
+    # 재무 시계열은 비상장사도 대상이다 → 시세를 전제하는 resolve() 대신 이쪽을 쓴다.
+    spec = market_data.resolve_financials(company, _blank(market) or "KR")
+    n = int(_pos(years) or 3)
+    h = market_data.history(spec, item, n)
+    rows = h["rows"]
+    if not rows:
+        raise DataError(f"{spec['name']}: '{item}' 연간 시계열을 찾지 못했습니다.")
+    f = lambda x: f"{x:,.0f}"  # noqa: E731
+    detail = " / ".join(f"{r.get('period') or r['year']} {f(r['amount'])}" for r in rows)
+    latest = rows[0]
+    note = (f"최근 {len(rows)}개 회계연도({rows[0].get('period')} ~ {rows[-1].get('period')}): "
+            f"{detail} [{h['currency']}]. 출처 {h['source']} · {h['basis']}"
+            + (f" · 접수일 {h['filing_date']}" if h.get("filing_date") else "")
+            + ". 연도는 조회 시점에 공시가 존재하는 최신 회계연도부터 역순으로 잡혔다 — "
+              "호출부가 연도를 찍지 않는다.")
+    extras = {}
+    for r in rows:
+        key = str(r.get("period") or r["year"])
+        extras[key] = Value(
+            r["amount"], h["currency"], label=f"{spec['name']} {item} {key}",
+            provenance=Provenance(
+                source=h["source"], source_type=SourceType.AUTHORITATIVE,
+                source_url=h["source_url"], original_field=h["basis"],
+                as_of=key, filing_date=h.get("filing_date")))
+    return Value(
+        value=latest["amount"], unit=h["currency"],
+        label=f"{spec['name']} {item} 최근 {len(rows)}개년 (최신 {latest.get('period')})",
+        provenance=Provenance(
+            source=h["source"], source_type=SourceType.AUTHORITATIVE,
+            source_url=h["source_url"], original_field=h["basis"],
+            as_of=str(latest.get("period")), filing_date=h.get("filing_date"), note=note),
+        extras=extras)
+
+
+def _business_mix(company: str, year: int | None = None) -> Value:
+    return business_mix.gate_value(company, _pos(year))
+
+
+def _market_cost_of_debt(company: str, year: int | None = None, country: str = "KR",
+                         rating: str | None = None) -> Value:
+    return dcf_inputs_engine.market_cost_of_debt(company, _pos(year),
+                                                 _blank(country) or "KR", _blank(rating))
+
+
+def _market_cap(company: str, market: str = "KR", as_of: str | None = None) -> Value:
+    spec = market_data.resolve(company, _blank(market) or "KR")
+    return market_data.market_cap(spec, _blank(as_of))
+
+
+def _ebitda(company: str, market: str = "KR", basis: str = "LTM") -> Value:
+    """EBITDA = 영업이익 + D&A. 산술을 LLM 이 하지 않도록 엔진이 계산해 근거를 붙인다."""
+    spec = market_data.resolve(company, _blank(market) or "KR")
+    use_ltm = (_blank(basis) or "LTM").upper() != "FY"
+    if use_ltm and market_data.supports_ltm(spec["market"]):
+        ebit, eb_basis = market_data.ltm(spec, "operating_income")
+        da, da_basis = market_data.ltm(spec, "da")
+    else:
+        ebit, eb_basis = market_data.point(spec, "operating_income"), "FY"
+        da, da_basis = market_data.point(spec, "da"), "FY"
+    total = ebit.value + da.value
+    mixed = "" if eb_basis == da_basis else (
+        f" ⚠️ 기준기간 혼용: 영업이익={eb_basis}, D&A={da_basis} — 비교표에 이 사실을 표시할 것.")
+    return Value(
+        total, spec["currency"], label=f"{spec['name']} EBITDA ({eb_basis} 기준)",
+        provenance=Provenance(
+            source="계산엔진(engines.market_data)", source_type=SourceType.COMPUTED,
+            source_url="(computed: 영업이익 + D&A)",
+            as_of=ebit.provenance.as_of,
+            note=(f"영업이익 {ebit.value:,.0f} ({eb_basis}, {ebit.provenance.as_of}) + "
+                  f"D&A {da.value:,.0f} ({da_basis}, {da.provenance.as_of}) = "
+                  f"{total:,.0f} {spec['currency']}.{mixed}"),
+        ),
+        extras={"operating_income": ebit, "da": da},
+    )
 
 
 # ── 선택 인자 정규화 ──────────────────────────────────────────────
@@ -182,8 +282,13 @@ def _pos(x):
 
 
 # ── DCF 입력 자동 도출 ────────────────────────────────────────────
-def _net_debt(company: str, year: int | None = None, include_lease: bool = True) -> Value:
-    return dcf_inputs_engine.net_debt(company, _pos(year), include_lease)
+def _net_debt(company: str, year: int | None = None, include_lease: bool = True,
+              market: str = "KR") -> Value:
+    m = market_data.normalize_market(_blank(market), "KR")
+    if m == "KR":
+        return dcf_inputs_engine.net_debt(company, _pos(year), include_lease)
+    spec = market_data.resolve(company, m)
+    return market_data.net_debt(spec, include_lease)
 
 
 def _dcf_assumptions(company: str, n: int = 5, year: int | None = None) -> Value:
@@ -196,7 +301,9 @@ def _dcf_assumptions(company: str, n: int = 5, year: int | None = None) -> Value
     lines = [f"{v.label}: {v.value}%" for v in found.values()]
     note = (f"{r['company']} {r['years'][-1]}~{r['years'][0]} 실적 기반. " + " / ".join(lines)
             + (f". 자동 도출 실패: {', '.join(r['missing'])} → 이 항목만 가정으로 지정 필요"
-               if r["missing"] else ". 전 항목 자동 도출 성공"))
+               if r["missing"] else ". 전 항목 자동 도출 성공")
+            + (f". 운전자본 기준: {r['nwc_basis']}" if r.get("nwc_basis") else "")
+            + (f" ⚠️ {r['nwc_needs_confirmation']}" if r.get("nwc_needs_confirmation") else ""))
     return Value(
         value=len(found), unit="개 항목",
         label=f"{r['company']} DCF 가정 자동 도출({r['years'][-1]}~{r['years'][0]})",
@@ -213,7 +320,7 @@ def _cost_of_debt(company: str, year: int | None = None, include_lease: bool = T
 
 
 def _terminal_growth(country: str = "KR", tenor: str = "10Y") -> Value:
-    return dcf_inputs_engine.terminal_growth(country, _blank(tenor) or "10Y")
+    return dcf_inputs_engine.terminal_growth_cap(country, _blank(tenor) or "10Y")
 
 
 def _beta(company: str, industry: str | None = None, country: str = "KR",
@@ -403,12 +510,22 @@ REGISTRY: dict[str, dict] = {
                     "item": {
                         "type": "string",
                         "enum": ["revenue", "operating_income", "net_income",
-                                 "total_assets", "total_liabilities", "total_equity"],
+                                 "total_assets", "total_liabilities", "total_equity",
+                                 "cash", "ppe", "inventories", "trade_receivables",
+                                 "trade_payables", "cogs", "sga", "interest_expense",
+                                 "tax_expense", "da"],
                         "description": ("항목: revenue(매출액), operating_income(영업이익), "
                                         "net_income(당기순이익), total_assets(자산총계), "
-                                        "total_liabilities(부채총계), total_equity(자본총계=순자산)."),
+                                        "total_liabilities(부채총계), total_equity(자본총계=순자산), "
+                                        "cash(현금및현금성자산), ppe(유형자산), inventories(재고자산), "
+                                        "trade_receivables(매출채권), trade_payables(매입채무), "
+                                        "cogs(매출원가), sga(판매비와관리비), "
+                                        "interest_expense(금융비용), tax_expense(법인세비용), "
+                                        "da(감가상각비+무형자산상각비 — 현금흐름표 또는 성격별 분류 "
+                                        "주석에서 추출. EBITDA = operating_income + da 이며 "
+                                        "직접 더하지 말고 get_ebitda 를 쓰는 게 낫다)."),
                     },
-                    "year": {"type": "integer", "description": "사업연도(예: 2024). 미지정 시 직전연도."},
+                    "year": {"type": "integer", "description": "사업연도. **생략하면 공시가 존재하는 최신 사업연도**를 자동으로 찾는다 — 최신 값을 원하면 넣지 마라. 특정 과거 연도가 필요할 때만 지정한다."},
                     "report": {
                         "type": "string",
                         "enum": ["annual", "half", "q1", "q3"],
@@ -592,7 +709,9 @@ REGISTRY: dict[str, dict] = {
                 "properties": {
                     "company": {"type": "string", "description": "회사명 또는 티커(예: AAPL)."},
                     "item": {"type": "string", "enum": _ITEM_ENUM, "description": _ITEM_DESC},
-                    "year": {"type": "integer", "description": "회계연도(예: 2024). 미지정 시 최신 10-K."},
+                    "year": {"type": "integer",
+                             "description": "회계연도. **생략하면 최신 10-K** 를 쓴다 — 최신 값을 "
+                                            "원하면 넣지 마라. 과거 연도가 필요할 때만 지정."},
                 },
                 "required": ["company", "item"],
                 "additionalProperties": False,
@@ -608,14 +727,17 @@ REGISTRY: dict[str, dict] = {
                 "회사명(영/일문) 또는 증권코드(4~5자리)로 조회(예: 7203, TOYOTA MOTOR). 단위 JPY. "
                 "연결(그룹) 기준을 우선하며, 연결 데이터가 없는 항목은 개별(비연결) 기준으로 "
                 "대체되고 그 사실이 결과의 label/note 에 명시된다. "
-                f"{_ITEM_DESC} 여러 항목이 필요하면 이 도구를 여러 번(병렬로) 호출하라."
+                f"{_ITEM_DESC_JP} 여러 항목이 필요하면 이 도구를 여러 번(병렬로) 호출하라."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "company": {"type": "string", "description": "회사명(영/일문) 또는 증권코드(예: 7203)."},
-                    "item": {"type": "string", "enum": _ITEM_ENUM, "description": _ITEM_DESC},
-                    "year": {"type": "integer", "description": "결산연도(예: 2024). 미지정 시 최신 유가증권보고서."},
+                    "item": {"type": "string", "enum": _ITEM_ENUM_JP, "description": _ITEM_DESC_JP},
+                    "year": {"type": "integer",
+                             "description": "결산연도. **생략하면 최신 유가증권보고서**를 쓴다 — "
+                                            "최신 값을 원하면 넣지 마라. 3월결산 기업이 많아 "
+                                            "회계연도 표기가 한국과 한 해 어긋날 수 있다."},
                 },
                 "required": ["company", "item"],
                 "additionalProperties": False,
@@ -637,7 +759,9 @@ REGISTRY: dict[str, dict] = {
                 "properties": {
                     "company": {"type": "string", "description": "4자리 종목코드(예: 2330) 또는 정식 중국어 회사명."},
                     "item": {"type": "string", "enum": _ITEM_ENUM, "description": _ITEM_DESC},
-                    "year": {"type": "integer", "description": "회계연도(예: 2023). 미지정 시 4개 분기가 모두 존재하는 최신연도."},
+                    "year": {"type": "integer",
+                             "description": "회계연도. **생략하면 4개 분기가 모두 존재하는 최신 "
+                                            "연도**를 자동으로 찾는다 — 최신 값을 원하면 넣지 마라."},
                 },
                 "required": ["company", "item"],
                 "additionalProperties": False,
@@ -652,7 +776,16 @@ REGISTRY: dict[str, dict] = {
                 "종목 식별자(티커/ISIN/CUSIP 등)를 Bloomberg OpenFIGI 로 FIGI 및 회사명·거래소·"
                 "증권종류로 매핑한다. 크로스보더 comps 에서 '이 티커와 저 티커가 같은 회사인가' "
                 "검증하거나 ISIN을 거래소별 티커로 환산할 때 쓴다. 티커만 주면 여러 거래소에 "
-                "복수상장된 경우 모호할 수 있으니 이때는 exch_code(예: US, KS, JP)로 좁혀라."
+                "복수상장된 경우 모호할 수 있으니 이때는 exch_code 로 좁혀라.\n"
+                "⚠️ exch_code 는 **거래소 코드이지 국가 코드가 아니다.** 대만은 TW 가 아니라 "
+                "**TT** 다(실측 2026-08-27: TICKER=2330 + exch_code=TT → BBG000BN2JD8 성공, "
+                "TW 로는 실패). 자주 쓰는 코드: US(미국), KS(KRX 유가증권), KQ(코스닥), "
+                "JT/JP(일본), TT(대만), HK(홍콩), CH(중국), LN(런던), GR(독일).\n"
+                "코드 하나 틀렸다고 '종목 식별 실패' 로 결론내지 마라 — 다른 코드나 exch_code "
+                "없이 다시 시도하고, 미국 ADR 도 시도하라(TSMC → TICKER=TSM + US → "
+                "BBG000BD8ZK0). 그리고 **FIGI 매핑 실패는 밸류에이션 불가 사유가 아니다** — "
+                "시가총액·재무는 각 시장 도구(get_market_cap, get_financial_item_*)로 "
+                "종목코드만 있으면 바로 조회된다."
             ),
             "input_schema": {
                 "type": "object",
@@ -677,17 +810,39 @@ REGISTRY: dict[str, dict] = {
             "description": (
                 "한국 기업의 상증법(상속세및증여세법) 보충적 평가방법에 따른 1주당 평가액을 계산한다. "
                 "DART 별도재무제표의 3개년 당기순이익·자본총계·발행주식총수로 "
-                "순손익가치(3:2 가중, 환원율 10%)와 순자산가치를 조합. 결과는 computed 등급이며 "
-                "세무조정·시가평가 미반영 근사임(답변에 이 한계를 반드시 명시). 단위 원/주."
+                "순손익가치(가중 3:2, 환원율 10%)와 순자산가치를 조합. 결과는 computed 등급이며 "
+                "세무조정·시가평가 미반영 근사임(답변에 이 한계를 반드시 명시). 단위 원/주.\n"
+                "법령 판정을 엔진이 자동으로 한다(결과 note 의 [법령판정] 을 그대로 인용하라):\n"
+                "· 부동산과다보유법인(상증령 §54①) — 재무상태표의 토지·건물·투자부동산 비중이 "
+                "50% 이상이면 가중치를 3:2 에서 **2:3 으로 전환**\n"
+                "· 순자산가치 단독평가(상증령 §54④) — 3개년 순손익 부족(사업개시 3년 미만) 또는 "
+                "부동산·주식 등이 자산의 80% 이상이면 순자산가치만으로 평가\n"
+                "· 최대주주 할증(상증법 §63③) — largest_shareholder=true 면 20% 할증, "
+                "sme=true(중소기업)면 할증 제외\n"
+                "청산·휴폐업 같은 재무제표로 알 수 없는 사유는 nav_only 로 직접 지정한다."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "company": {"type": "string", "description": "회사명 또는 6자리 종목코드."},
-                    "year": {"type": "integer", "description": "평가 기준 사업연도(예: 2024). 미지정 시 직전연도."},
+                    "year": {"type": "integer", "description": "평가 기준 사업연도. **생략하면 공시가 존재하는 최신 사업연도**를 자동으로 찾는다 — 최신 값을 원하면 넣지 마라. 특정 과거 연도가 필요할 때만 지정한다."},
                     "real_estate_heavy": {
                         "type": "boolean",
-                        "description": "부동산과다보유법인이면 true (가중치 2:3 적용). 기본 false(3:2).",
+                        "description": "부동산과다보유법인 여부(가중치 2:3). **생략하면 재무상태표 "
+                                       "부동산 비중으로 자동 판정한다** — 아는 경우에만 지정.",
+                    },
+                    "nav_only": {
+                        "type": "boolean",
+                        "description": "순자산가치 단독평가 강제. 생략하면 자동 판정(순손익 3개년 "
+                                       "부족·부동산주식 80% 이상). 청산·휴폐업이면 true 로 지정.",
+                    },
+                    "largest_shareholder": {
+                        "type": "boolean",
+                        "description": "최대주주 지분이면 true → 20% 할증(상증법 §63③).",
+                    },
+                    "sme": {
+                        "type": "boolean",
+                        "description": "중소기업 등 할증 제외 대상이면 true.",
                     },
                 },
                 "required": ["company"],
@@ -706,7 +861,14 @@ REGISTRY: dict[str, dict] = {
                 "nwc_pct, terminal_growth_pct. 가정이 없으면 지어내지 말고 사용자에게 물어봐라. "
                 "market으로 한국(KR·DART)/미국(US·SEC)/일본(JP·EDINET)/대만(TW·FinMind) 기업 모두 계산 가능. "
                 "결과 computed, 단위는 시장별 현지통화/주. 주당가치 외에 Enterprise Value·Equity Value도 "
-                "extras(enterprise_value, equity_value)로 함께 반환되니 답변에 같이 인용할 것."
+                "extras(enterprise_value, equity_value)로 함께 반환되니 답변에 같이 인용할 것.\n"
+                "⛔ **게이트**: 한국 기업이 캡티브 금융 보유(mixed)이거나 순수 금융회사(financial)면 "
+                "이 도구가 오류로 차단하고 SOTP 대안을 알려준다 — 우회하지 말고 그 안내를 사용자에게 "
+                "전달하라. get_business_mix 로 미리 확인할 수 있다. allow_mixed=true 는 사용자가 "
+                "명시적으로 강행을 요청했을 때만 쓰고, 그 경우 결과에 이중 왜곡 경고가 붙는다.\n"
+                "⛔ **봉인**: UFCF 전 연도 음수 / 최종연도 UFCF ≤ 0 / EV 음수 / 지분가치 음수 중 "
+                "하나라도 걸리면 주당가치를 **null 로 반환**한다(NM). 그때는 숫자를 만들어내지 말고 "
+                "note 의 '[산출 불가 · NM]' 사유와 원인 가정을 그대로 전달하라."
             ),
             "input_schema": {
                 "type": "object",
@@ -726,7 +888,12 @@ REGISTRY: dict[str, dict] = {
                     "terminal_growth_pct": {"type": "number", "description": "영구성장률 %. WACC보다 작아야 함. 예: 2"},
                     "forecast_years": {"type": "integer", "description": "예측기간(년). 기본 5."},
                     "tax_rate_pct": {"type": "number", "description": "법인세율 %. 미지정 시 Damodaran 해당국 세율."},
-                    "year": {"type": "integer", "description": "기준 사업연도. 미지정 시 직전연도."},
+                    "year": {"type": "integer", "description": "기준 사업연도. **생략하면 공시가 존재하는 최신 사업연도**를 자동으로 찾는다 — 최신 값을 원하면 넣지 마라. 특정 과거 연도가 필요할 때만 지정한다."},
+                    "allow_mixed": {
+                        "type": "boolean",
+                        "description": "금융부문 게이트를 우회한다. 사용자가 명시적으로 강행을 "
+                                       "요청했을 때만 true. 결과에 이중 왜곡 경고가 붙는다.",
+                    },
                 },
                 "required": ["company", "wacc_pct", "net_debt", "revenue_growth_pct",
                              "ebit_margin_pct", "da_pct", "capex_pct", "nwc_pct", "terminal_growth_pct"],
@@ -739,21 +906,201 @@ REGISTRY: dict[str, dict] = {
         "schema": {
             "name": "compute_comps",
             "description": (
-                "Trading comps(자기자본배수)로 타깃의 주당가치를 추정한다. peer들의 PER(=시총/순이익)·"
-                "PBR(=시총/자본)의 중앙값을 타깃 당기순이익·자본총계에 적용. 시가총액=네이버(KRX 시세), "
-                "재무=DART. peer는 반드시 상장사여야 한다(비상장은 시총 없어 제외). 결과 computed, 원/주."
+                "Trading comps 비교표를 만든다 — **크로스보더(한국·미국·일본·대만 혼합) 가능**하고 "
+                "EV 배수와 자기자본 배수를 함께 낸다: EV/EBITDA, EV/EBIT, EV/Revenue, P/E, P/B.\n"
+                "기준 정렬을 엔진이 강제한다: ① 시가총액은 4개 시장의 **공통 거래일** 종가 × 유통 "
+                "보통주식수 ② 분모는 각 시장 LTM(최근 12개월) ③ 절대금액만 display_currency 로 환산"
+                "(배수는 통화중립이라 환산하지 않음).\n"
+                "**타깃 없이 표만 만드는 것이 기본 용도다** — '이 4개사 comps 표 만들어줘' 같은 요청은 "
+                "companies 만 넣고 target 은 비운다. target 을 넣으면 median 배수를 적용해 내재 "
+                "EV·지분가치·주당가치까지 계산한다.\n"
+                "한 회사의 한 항목을 못 구해도 표 전체를 포기하지 않는다 — 그 셀만 미확보로 남기고 "
+                "나머지를 계산하며, 결과 note 의 '미확보 항목'·'⚠️' 경고(기준기간 혼용, 결산월 차이, "
+                "순부채 정의 차이, 회계기준 차이)를 **답변에 그대로 옮겨 적어야 한다**. "
+                "extras 에 회사별 원자료 Value(시총·순부채·영업이익·D&A·순이익·자본)가 들어 있으니 "
+                "표의 각 숫자를 그것으로 인용하라."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "target": {"type": "string", "description": "평가 대상 회사명 또는 종목코드."},
-                    "peers": {
+                    "companies": {
                         "type": "array", "items": {"type": "string"},
-                        "description": "비교 상장사 목록(회사명 또는 종목코드). 예: ['SK하이닉스','삼성전자'].",
+                        "description": ("비교기업 목록. 해외 종목은 '회사:시장' 으로 시장을 붙인다 "
+                                        "(시장: KR/US/JP/TW). 예: "
+                                        "['삼성전자','SK하이닉스','MU:US','2330:TW']. "
+                                        "미국은 티커(MU), 대만은 4자리 종목코드(2330), "
+                                        "일본은 증권코드(7203)를 쓰는 것이 가장 확실하다."),
                     },
-                    "year": {"type": "integer", "description": "기준 사업연도. 미지정 시 직전연도."},
+                    "target": {
+                        "type": "string",
+                        "description": ("선택. 평가 대상 회사('회사:시장' 형식 가능). 지정하면 median "
+                                        "배수를 적용해 내재 주당가치를 계산한다. 비교표 자체가 "
+                                        "산출물이면 비워둔다."),
+                    },
+                    "market": {
+                        "type": "string",
+                        "description": "시장 코드를 안 붙인 항목의 기본 시장. KR(기본)/US/JP/TW.",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": ("선택. 시가총액 기준일 YYYY-MM-DD. 미지정 시 모든 종목의 "
+                                        "공통 최신 거래일을 엔진이 정한다."),
+                    },
+                    "basis": {
+                        "type": "string",
+                        "enum": ["LTM", "FY"],
+                        "description": ("분모 기준기간. LTM(기본, 최근 12개월) 또는 FY(최근 확정 연간). "
+                                        "일본은 LTM 이 불가해 자동으로 FY 가 되고 표에 표시된다."),
+                    },
+                    "display_currency": {
+                        "type": "string",
+                        "description": "절대금액 표시통화. 기본 USD. 배수는 환산하지 않는다.",
+                    },
                 },
-                "required": ["target", "peers"],
+                "required": ["companies"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_financial_history": {
+        "fn": _fin_history,
+        "schema": {
+            "name": "get_financial_history",
+            "description": (
+                "한 항목의 **최근 N개 회계연도** 시계열을 한 번에 가져온다 — 한국·미국·일본·"
+                "대만 모두. 값은 extras 에 연도별로 들어오고, value 는 최신연도 값이다.\n"
+                "⭐ **'최근 3개년 재무' 류 요청에는 이 도구를 쓴다.** get_financial_item 을 "
+                "연도별로 여러 번 부르지 마라 — 그러면 연도를 직접 찍어야 하고, 그때 낡은 "
+                "연도를 넣어 옛 데이터를 가져오는 사고가 난다(실측: 리노공업에 year=2024 를 "
+                "넣어 FY2022~2024 를 반환. 실제 최신은 FY2025, 2026-03-18 접수).\n"
+                "이 도구는 **연도 인자를 받지 않는다.** 각 시장 provider 가 조회 시점에 공시가 "
+                "존재하는 최신 회계연도를 스스로 찾아 거기서 역순으로 내려온다. 결산월이 다른 "
+                "회사(미국 8월결산·일본 3월결산)도 각자의 최신 회계연도가 잡히므로, 여러 회사를 "
+                "나란히 볼 때는 note 의 회계연도 표기를 그대로 옮겨 기준 차이를 밝혀라."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string",
+                                "description": "회사명 또는 종목코드/티커(예: 리노공업, MU, 2330, 7203)."},
+                    "item": {"type": "string", "enum": _ITEM_ENUM, "description": _ITEM_DESC},
+                    "years": {"type": "integer",
+                              "description": "가져올 연수. 기본 3, 최대 10. 일본은 유가증권보고서 "
+                                             "한 건에 담기는 5개년이 상한이다."},
+                    "market": {"type": "string",
+                               "description": "시장 코드 KR(기본)/US/JP/TW. 해외면 반드시 지정."},
+                },
+                "required": ["company", "item"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_business_mix": {
+        "fn": _business_mix,
+        "schema": {
+            "name": "get_business_mix",
+            "description": (
+                "이 회사에 **단일 FCFF DCF 를 적용할 수 있는지** 판정한다. 결과는 3분류: "
+                "industrial(제조·서비스 단일 실체 → 단일 DCF 가능) / mixed(캡티브 금융 보유 "
+                "→ SOTP 필요) / financial(순수 금융회사 → FCFF·EV 개념 불성립, P/B·잔여이익).\n"
+                "**한국 기업의 DCF 를 시작하기 전에 이걸 먼저 부른다.** 캡티브 금융이 섞인 회사는 "
+                "연결 IBD·운전자본·부채비중에 금융부문이 들어가 WACC 과대 + EV 과다차감의 이중 "
+                "왜곡이 생긴다(현대자동차 실측: 주당 −5,042,055원). compute_dcf 가 같은 판정으로 "
+                "차단하지만, 미리 확인해서 사용자에게 SOTP 를 제안하는 것이 낫다.\n"
+                "판정 근거(금융업 자산비율·손익 구성·사업의 내용 섹션)가 note 에 들어오니 "
+                "답변에 그대로 인용하라."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 또는 6자리 종목코드."},
+                    "year": {"type": "integer", "description": "사업연도. 생략하면 최신."},
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_market_cost_of_debt": {
+        "fn": _market_cost_of_debt,
+        "schema": {
+            "name": "get_market_cost_of_debt",
+            "description": (
+                "**시장** 세전 타인자본비용(Kd) — 한국은행 ECOS 의 등급별 회사채(3년) 유통수익률. "
+                "WACC 에 넣어야 하는 값은 이쪽이다(신규 조달금리).\n"
+                "get_cost_of_debt 는 '이자비용 ÷ 차입금' 으로 **과거 조달금리의 가중평균**을 낸다 — "
+                "정확한 실효금리지만 신규 조달비용이 아니어서, 저금리 시기에 조달한 회사는 Kd 가 "
+                "무위험수익률보다 낮아지는 역전이 생긴다(SK하이닉스 실측 3.79% < Rf 4.288% → "
+                "신용스프레드가 음수라는 비논리). 두 값의 괴리와 역전 여부가 note 에 들어온다.\n"
+                "등급을 모르면 생략하라 — 이자보상배율(EBIT÷이자비용)로 AA-/BBB- 구간을 고른다. "
+                "한국은행 고시 등급이 AA-/BBB- 둘뿐이라 그 사이 등급은 근사다. 한국 기업만 지원."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 또는 6자리 종목코드."},
+                    "year": {"type": "integer", "description": "사업연도. 생략하면 최신."},
+                    "country": {"type": "string", "description": "국가 코드. 현재 KR 만 지원."},
+                    "rating": {
+                        "type": "string",
+                        "description": "신용등급을 알면 지정: 'AA-' 또는 'BBB-'. 생략 시 "
+                                       "이자보상배율로 자동 선택.",
+                    },
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_market_cap": {
+        "fn": _market_cap,
+        "schema": {
+            "name": "get_market_cap",
+            "description": (
+                "시가총액을 조회한다 — **국내외 모두 가능**. 유통 보통주식수 × 기준일 종가로 "
+                "계산하며 종가·주식수·기준일을 extras 와 note 에 남긴다.\n"
+                "시장별 원천: KR=네이버(KRX 시가총액을 종가로 역산한 유통보통주수), "
+                "US=Yahoo 종가 × SEC 발행주식수, TW=Yahoo × FinMind, JP=Yahoo × EDINET.\n"
+                "⚠️ 한국 기업의 시가총액에 DART 발행주식총수를 쓰면 안 된다 — 우선주·누적발행분이 "
+                "포함돼 실측에서 삼성전자 +53.8%, SK하이닉스 +683% 과대였다. 이 도구가 올바른 "
+                "주식수를 쓴다."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string",
+                                "description": "회사명 또는 종목코드/티커(예: 삼성전자, MU, 2330, 7203)."},
+                    "market": {"type": "string",
+                               "description": "시장 코드 KR(기본)/US/JP/TW. 해외면 반드시 지정."},
+                    "as_of": {"type": "string",
+                              "description": "선택. 기준일 YYYY-MM-DD. 그 날짜 이하 최근 거래일 종가를 쓴다."},
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_ebitda": {
+        "fn": _ebitda,
+        "schema": {
+            "name": "get_ebitda",
+            "description": (
+                "EBITDA(=영업이익 + D&A)를 계산한다 — 국내외 모두. basis='LTM'(기본)이면 최근 12개월, "
+                "'FY'면 최근 확정 연간. 영업이익과 D&A 를 각각 공시에서 뽑아 엔진이 더하고 "
+                "각각의 기준기간·출처를 note 와 extras 에 남긴다. "
+                "**직접 더하지 말고 이 도구를 쓴다.** 한국 기업은 D&A 가 현금흐름표에 분리돼 있지 "
+                "않은 경우(삼성전자·SK하이닉스 실측) 성격별 분류 주석에서 연간값을 쓰게 되며, "
+                "그때 note 에 '기준기간 혼용' 경고가 붙으니 답변에 그대로 전달하라."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 또는 종목코드/티커."},
+                    "market": {"type": "string", "description": "시장 코드 KR(기본)/US/JP/TW."},
+                    "basis": {"type": "string", "enum": ["LTM", "FY"],
+                              "description": "기준기간. 기본 LTM."},
+                },
+                "required": ["company"],
                 "additionalProperties": False,
             },
         },
@@ -832,16 +1179,24 @@ REGISTRY: dict[str, dict] = {
         "schema": {
             "name": "get_net_debt",
             "description": (
-                "순부채를 DART 공시에서 자동 계산한다. 순부채 = 이자발생부채(단기차입금 + "
-                "장기차입금·사채 + 리스부채) − 현금및현금성자산. compute_dcf 의 net_debt 인자에 "
-                "그대로 넣으면 된다. 음수면 순현금(net cash) 상태. "
-                "**순부채를 사용자에게 묻지 말고 이 도구를 먼저 쓸 것.**"
+                "순부채를 공시에서 자동 계산한다 — **국내외 모두 가능**. 순부채 = 이자발생부채"
+                "(단기차입금 + 장기차입금·사채 + 리스부채) − 현금및현금성자산. compute_dcf 의 "
+                "net_debt 인자에 그대로 넣으면 된다. 음수면 순현금(net cash) 상태. "
+                "**순부채를 사용자에게 묻지 말고 이 도구를 먼저 쓸 것.**\n"
+                "시장별 원천: KR=DART(비상장은 감사보고서 파싱), US=SEC XBRL, TW=FinMind. "
+                "일본은 차입금 계정 자동추출이 없어 지원하지 않는다(오류로 명확히 알려준다). "
+                "정의 차이: 대만 공시에는 리스부채 계정이 없어 IFRS 16 리스부채가 빠지며 그 사실이 "
+                "note 에 남으므로 비교표에 표시하라. 단기투자자산은 어느 시장에서도 차감하지 "
+                "않는다(정의 통일)."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "company": {"type": "string", "description": "회사명 (한국 기업)."},
-                    "year": {"type": "integer", "description": "사업연도. 생략하면 최신."},
+                    "company": {"type": "string",
+                                "description": "회사명 또는 종목코드/티커(예: 삼성전자, MU, 2330)."},
+                    "market": {"type": "string",
+                               "description": "시장 코드 KR(기본)/US/TW. 해외면 반드시 지정."},
+                    "year": {"type": "integer", "description": "사업연도. 생략하면 최신(해외는 항상 최신)."},
                     "include_lease": {
                         "type": "boolean",
                         "description": "리스부채(IFRS 16) 포함 여부. 기본 true — D&A 에 "
@@ -884,8 +1239,11 @@ REGISTRY: dict[str, dict] = {
             "description": (
                 "세전 타인자본비용(Kd)을 공시에서 계산한다: 현금흐름표의 이자비용 ÷ 이자발생부채. "
                 "손익계산서의 '금융비용'은 환차손·파생손실을 포함해 Kd 로 쓸 수 없어(삼성전자 "
-                "실측 48.8%) 이자 전용 계정을 쓴다. WACC 의 cost_of_debt_pct 에 넣는 값. "
-                "무차입 회사는 계산 불가 → 산업평균(get_industry_benchmarks)을 쓸 것."
+                "실측 48.8%) 이자 전용 계정을 쓴다. "
+                "무차입 회사는 계산 불가 → 산업평균(get_industry_benchmarks)을 쓸 것.\n"
+                "⚠️ 이것은 **실효(과거 가중평균) 조달금리**다. WACC 에 넣을 신규 조달비용은 "
+                "get_market_cost_of_debt(ECOS 등급별 회사채)를 쓰고, 이 값은 교차검증에 쓴다 — "
+                "저금리 조달분이 남아 있으면 이 값이 무위험수익률보다 낮아진다(실측)."
             ),
             "input_schema": {
                 "type": "object",
@@ -905,10 +1263,13 @@ REGISTRY: dict[str, dict] = {
         "schema": {
             "name": "get_terminal_growth",
             "description": (
-                "영구성장률(terminal growth, g)을 제시한다. Damodaran 원칙에 따라 g 는 무위험 "
-                "수익률을 넘을 수 없으므로(영구히 경제보다 빠른 성장은 불가) 해당 국가 10년 "
-                "국채수익률을 g 의 상한으로 돌려준다. compute_dcf 의 terminal_growth_pct 에 "
-                "쓴다. 더 보수적으로 보려면 이보다 낮은 값을 쓸 것."
+                "영구성장률 g 의 **권장값과 상한을 분리해서** 돌려준다. "
+                "value = 권장 g(장기 물가+실질성장 수준, 한국 2.0%), extras.cap = 상한"
+                "(해당 국가 10년 국채수익률, Damodaran 원칙 g ≤ Rf).\n"
+                "⚠️ **상한을 g 로 그대로 쓰지 마라.** 예전에는 이 도구가 국채수익률만 돌려줬고 "
+                "그 값이 g 로 쓰여서 WACC−g 스프레드가 0.2%p 로 좁아지고 TV 가 EV 의 92% 를 "
+                "차지하는 결과가 나왔다(실측). 상한 근처를 쓰려면 근거를 별도로 제시해야 한다. "
+                "compute_dcf 의 terminal_growth_pct 에는 value(권장값)를 넣는다."
             ),
             "input_schema": {
                 "type": "object",
@@ -1024,7 +1385,13 @@ REGISTRY: dict[str, dict] = {
                                       "description": "목표 부채비중 D/(D+E), 0~1 을 직접 지정."},
                     "debt_ratio_source": {
                         "type": "string",
-                        "description": "부채비중 산출 경로: auto(국내는 시장가치 우선) | industry(산업평균).",
+                        "enum": ["auto", "industry", "spot"],
+                        "description": ("부채비중 산출 경로. auto(기본)=industry=Damodaran 산업 "
+                                        "median 을 **목표자본구조**로 사용. spot=평가시점 시장가치 "
+                                        "레버리지(IBD ÷ (IBD+시가총액)) — 이것은 target 이 아니라 "
+                                        "순간값이고, 주가 급등 시점에는 자기자본 비중이 과대해져 "
+                                        "WACC 이 구조적으로 높아진다(SK하이닉스 실측 D/V 1.88%). "
+                                        "spot 은 교차검증용으로만 쓴다."),
                     },
                 },
                 "required": ["company"],

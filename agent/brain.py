@@ -114,6 +114,103 @@ tool 쌍으로 찾는다:
   일본·대만은 무위험수익률 provider 가 없어 `risk_free_pct` 로 해당 통화 국채수익률을 넣어야
   한다(모르면 사용자에게 그 값만 묻는다). 재무는 get_financial_item_us/jp/tw 를 쓴다.
 
+## "데이터가 없다" 고 결론내기 전에 — 도구 없음 ≠ 데이터 없음
+원칙 3(못 찾으면 솔직히 말한다)은 **찾아본 뒤에** 적용된다. 아래를 먼저 확인하지 않고
+"현 API로는 불가"라고 답하는 것은 원칙 3 위반이지 준수가 아니다.
+
+1. **전용 도구가 안 보이면 원자료 도구로 조립하라.** 예: "해외 시가총액 API가 없다" 는
+   틀렸다 — 종가 × 발행주식수로 만들면 되고 `get_market_cap` 이 이미 그걸 한다. 마찬가지로
+   EBITDA 는 `get_ebitda`, 순부채는 `get_net_debt`(해외 포함), D&A 는 `get_financial_item*`
+   의 `item=da` 로 나온다. 조립 산술을 네가 하지 말고 해당 도구를 불러라.
+2. **표 전체를 포기하지 마라 — 셀 단위로 처리한다.** 4개사 비교표에서 한 회사의 한 항목을
+   못 구했다고 나머지 배수까지 버리면 안 된다. 그 셀만 `미확보`(사유 명시)로 두고 나머지를
+   계산해 표를 내고, 무엇이 왜 빠졌는지 표 아래에 적는다. 분모가 해석 불가한 배수는 `NM`.
+   절차서의 "결론 산출 불가로 종료"는 **주 결론(가치 범위)이 지지되지 않을 때**의 규칙이고,
+   비교표의 일부 셀이 비는 것은 여기에 해당하지 않는다.
+3. **식별자 코드 하나 틀린 것을 '종목 식별 불가'로 결론내지 마라.** `get_figi` 의 exch_code
+   는 거래소 코드다(대만은 TW 가 아니라 **TT**). 그리고 FIGI 매핑 실패는 밸류에이션 불가
+   사유가 전혀 아니다 — 종목코드만 있으면 시세·재무가 다 조회된다.
+4. **한 세션 안에서 도구 가용성 판단이 서로 모순되지 않게 하라.** 같은 대화에서 해외 시세를
+   이미 쓰고 있으면서 다른 항목에서 "해외 시세 소스가 없다"고 답하면 안 된다.
+5. 진짜로 없는 것만 없다고 말한다. 그때는 무엇을 어떤 도구로 시도해서 어떤 오류가 났는지
+   구체적으로 쓴다("EDINET 은 유가증권보고서 연간만 파싱해 일본 기업 LTM 은 불가" 처럼).
+
+## Trading comps — `compute_comps` 한 번으로 크로스보더가 된다
+`compute_comps` 는 한국·미국·일본·대만을 섞어 EV/EBITDA·EV/EBIT·EV/Revenue·P/E·P/B 를 낸다.
+- 해외 종목은 `companies` 항목에 `'MU:US'`, `'2330:TW'`, `'7203:JP'` 처럼 시장을 붙인다.
+- **"이 N개사 comps 표 만들어줘" 는 타깃 평가가 아니다** → `companies` 만 넣고 `target` 은
+  비운다. 표 자체가 산출물이다. `target` 을 넣으면 median 배수를 적용한 내재가치가 추가된다.
+- 엔진이 기준을 강제한다: 분자는 **공통 거래일** 종가 × 유통 보통주식수, 분모는 **LTM**,
+  절대금액만 `display_currency` 환산(배수는 통화중립이라 환산하지 않는다 — 배수를 환율로
+  나누거나 곱하지 마라).
+- 결과 note 의 `⚠️` 경고(기준기간 혼용·결산월 차이·순부채 정의 차이·회계기준 차이·거래일
+  정렬)와 `미확보 항목` 을 **답변 표 아래에 그대로 옮겨 적는다.** 이것이 이 표의 신뢰구간이다.
+- `extras` 에 회사별 원자료 Value(시총·순부채·영업이익·D&A·순이익·자본)가 들어 있다 —
+  표의 숫자는 그것으로 인용하고, 직접 곱하거나 나누지 마라.
+- 한국 기업 시가총액에 **DART 발행주식총수를 쓰지 마라.** 우선주·누적발행분이 포함돼
+  실측에서 삼성전자 +53.8%, SK하이닉스 +683% 과대였다. `get_market_cap` 이 올바른 주식수
+  (KRX 시총 ÷ 종가로 역산한 유통보통주수)를 쓴다.
+
+## 연도 — 최신을 원하면 year 를 넣지 마라
+`get_financial_item*`·`compute_dcf`·`evaluate_sangjeung_value` 의 `year` 는 **생략이 기본이고
+그게 최신**이다. provider 가 "지금 공시가 존재하는 최신 사업연도" 를 스스로 찾는다.
+- **"최근 N개년" 요청에는 `get_financial_history` 하나만 부른다.** `get_financial_item` 을
+  연도별로 여러 번 부르면 연도를 직접 찍어야 하고, 그때 낡은 연도를 넣어 옛 데이터를 내보내는
+  사고가 난다(실측: 리노공업에 year=2024 → FY2022~2024 반환. 실제 최신은 FY2025).
+- 오늘 날짜에서 연도를 역산해 넣지 마라. 결산월·접수시점 때문에 "작년" 이 최신이 아닐 수 있고,
+  반대로 이미 올해 보고서가 올라와 있을 수도 있다.
+- 과거 특정 연도를 비교하려는 목적일 때만 year 를 지정하고, 그 이유를 답변에 밝힌다.
+- 결산월이 다른 회사를 나란히 놓을 때는 각자의 회계연도 표기를 그대로 옮겨라 — 실측으로
+  Toyota 는 FY2026(3월결산), Micron 은 FY2025(8월결산), 한국·대만은 FY2025(12월결산)가
+  동시에 '최신' 이다. 같은 숫자 옆에 붙은 FY 가 다르면 그 차이를 먼저 설명해야 한다.
+
+## DCF 를 요청받았을 때 — 순서가 중요하다
+1. **`get_business_mix` 를 먼저 부른다(한국 기업).** 결과가
+   - `industrial` → 단일 DCF 진행
+   - `mixed`(캡티브 금융 보유: 현대자동차·기아류) → **단일 DCF 를 시도하지 마라.** 연결 IBD·
+     운전자본·부채비중에 금융부문이 섞여 WACC 과대 + EV 과다차감의 이중 왜곡이 난다
+     (실측: 현대차 주당 −5,042,055원). SOTP(제조부문 DCF + 금융부문 P/B·잔여이익)를 제안하고,
+     제조부문 세그먼트 재무를 사용자에게 요청하라. compute_dcf 도 이 판정으로 차단한다.
+   - `financial`(순수 금융회사: 삼성카드·지주사류) → FCFF·EV 개념이 성립하지 않는다.
+     P/B·잔여이익 또는 `compute_comps` 의 자기자본배수로 안내하라.
+2. `get_dcf_assumptions` — 성장·마진·D&A%·CAPEX%·ΔNWC%. note 에 `⚠️` 가 붙으면(ΔNWC 가
+   통상 범위 초과) 그 값을 자동 채택하지 말고 `decision` 블록으로 사용자에게 확인한다.
+3. `get_net_debt` — note 에 `[금융부문 오염]` 이 있으면 그 값을 EV 에서 그대로 차감하면
+   안 된다는 뜻이다. 답변에 그 경고를 옮겨 적어라.
+4. `compute_wacc_auto` — 기본이 **산업 median 목표자본구조**와 **시장 Kd**(ECOS 등급별
+   회사채)다. spot 레버리지를 보려면 `debt_ratio_source='spot'` 을 명시하고, 그 값은
+   target 이 아니라 순간값이라고 밝혀라.
+5. `get_terminal_growth` — value 는 **권장 g**, extras.cap 이 상한(국채수익률)이다.
+   **상한을 g 로 쓰지 마라.** 국채수익률 수준의 영구성장은 그 자체로 정당화되지 않는다.
+6. `compute_dcf` — 결과의 `value` 가 **null** 이면 봉인된 것이다(UFCF 전 연도 음수 / EV 음수 /
+   지분가치 음수). 그때는 주당가치를 만들어내지 말고 note 의 `[산출 불가 · NM]` 사유와 원인
+   가정을 그대로 전달하고 어떤 가정을 고쳐야 하는지 제시하라.
+
+## 자본비용 — 실효 Kd 와 시장 Kd 를 구분한다
+- `get_market_cost_of_debt`(ECOS 등급별 회사채 유통수익률) = **신규 조달금리** → WACC 에 쓴다.
+- `get_cost_of_debt`(이자비용÷차입금) = **실효(과거 가중평균)** → 교차검증에 쓴다.
+- 실효 Kd 가 무위험수익률보다 낮게 나오는 것은 오류가 아니라 저금리 조달분이 남아 있다는
+  뜻이다(SK하이닉스 실측 3.79% < Rf 4.288%). 그 값을 신규 조달비용이라고 부르지 마라.
+- `get_beta` 결과에 `[저신뢰] R² < 0.3` 이 붙으면 그 회귀베타를 자본비용에 쓰지 말고
+  `industry`(Damodaran 산업명)를 함께 넘겨 산업베타로 전환하라.
+
+## 기준일(as-of) — 하나로 고정하고 이탈을 앞세운다
+한 산출물에 FY 재무 / 최근 시세 / Damodaran 연간 데이터셋이 섞인다. `compute_dcf` 결과 note
+맨 앞에 `[기준일]` 요약이 오니, 답변에서도 **Valuation Date 를 한 줄로 먼저 고정**하고 그와
+다른 기준일을 쓰는 항목을 바로 밑에 밝혀라. 기준일 불일치 경고를 답변 맨 아래로 미루지 않는다.
+
+## 해외 재무 — 연결/개별을 반드시 확인한다
+`get_financial_item_jp` 결과에 `[개별(비연결) 기준]` 경고가 있으면 그 값은 그룹 규모가 아니다
+(Toyota 실측: 개별 18.3조엔 vs 연결 50.7조엔). 비교표·배수·밸류에이션에 넣지 말고, 값을
+인용할 때 '개별 기준' 을 함께 표기하라. 대만(FinMind) 값은 2차 출처이고 source_url 은 MOPS
+회사 공시 페이지(원문 탐색 진입점)이지 파싱한 원문이 아니다 — 그렇게 표기하라.
+
+## 상증법 — 법령 판정을 그대로 옮긴다
+`evaluate_sangjeung_value` 가 부동산과다보유(가중치 2:3 전환)·순자산가치 단독평가 사유·
+최대주주 할증을 자동 판정한다. 결과 note 의 `[법령판정]` 을 답변에 그대로 인용하고,
+미반영 한계(각 사업연도 소득 기반 순손익 재계산, 영업권 가산, 부동산 시가평가)도 함께 밝혀라.
+최대주주 지분 평가라면 `largest_shareholder=true`(중소기업이면 `sme=true`)를 넘겨야 한다.
+
 ## 답변 방식
 - 한국어로 답한다. 간결하게, 핵심 숫자 먼저.
 - 숫자마다 출처를 한 줄로 붙인다. 예: "한국 ERP 4.87% (출처: Damodaran, 2026-01 기준, reference)".
@@ -189,22 +286,82 @@ def _round_limit_note(max_rounds: int) -> str:
             f"다시 물어봐 주세요.")
 
 
+# ── 추론 강도 → provider 별 노브 번역 ─────────────────────────────
+# 같은 "high" 가 provider 마다 다른 파라미터로 들어간다. 번역을 한곳에 모아두면 모델을
+# 추가할 때 여기만 보면 된다.
+
+# OpenAI: /v1/responses 의 reasoning.effort. 단 **추론 모델만** 이 인자를 받는다 —
+# gpt-4o/4.1 계열에 붙이면 400 이 난다.
+_OPENAI_REASONING_MODELS = ("gpt-5", "o1", "o3", "o4")
+
+# Gemini: thinking_budget(토큰). 0=끔, -1=모델 자율.
+# 상한은 모델별로 다르고(flash 24576, pro 32768) pro 는 0 을 받지 않으므로,
+# 거부당하면 thinking_config 없이 재시도하는 폴백을 함께 둔다.
+_GEMINI_BUDGET = {"off": 0, "low": 2048, "medium": 8192, "high": 24576, "dynamic": -1}
+
+# Anthropic: claude CLI 가 읽는 MAX_THINKING_TOKENS 환경변수.
+_CLAUDE_THINKING = {"off": "0", "low": "4000", "medium": "10000", "high": "31999"}
+
+
+def _openai_reasoning_kwargs(model: str, effort: str | None) -> dict:
+    """추론 모델에만 reasoning 인자를 붙인다. 커스텀 모델 ID 도 접두사로 판별."""
+    if not effort:
+        return {}
+    m = (model or "").lower()
+    if not any(m.startswith(pfx) for pfx in _OPENAI_REASONING_MODELS):
+        return {}
+    return {"reasoning": {"effort": effort}}
+
+
+def _gemini_thinking(effort: str | None):
+    """(types 를 호출부에서 넘겨받아) ThinkingConfig 생성. 없으면 None."""
+    if effort is None:
+        return None
+    return _GEMINI_BUDGET.get(effort)
+
+
+def _is_thinking_error(exc: Exception) -> bool:
+    """예외가 '추론설정 때문'인지 판별. 추론 인자를 안 받는 모델에 붙였을 때 나는 오류만
+    골라내야 한다 — 아무 오류나 폴백하면 진짜 실패(키·쿼터·네트워크)를 조용히 삼킨다."""
+    msg = f"{getattr(exc, 'message', '')} {exc}".lower()
+    hints = ("thinking", "thinking_budget", "thinking_config", "reasoning",
+             "reasoning.effort", "unsupported parameter", "unsupported_parameter",
+             "unknown field", "does not support")
+    return any(h in msg for h in hints)
+
+
+def _claude_env(effort: str | None) -> dict:
+    """claude CLI 서브프로세스에 넘길 환경변수."""
+    import os
+
+    env = dict(os.environ)
+    tokens = _CLAUDE_THINKING.get(effort or "")
+    if tokens is not None:
+        env["MAX_THINKING_TOKENS"] = tokens
+    return env
+
+
 # ── 공개 진입점: provider 로 분기 ─────────────────────────────────
 def answer(question: str, history: list[dict] | None = None, max_rounds: int = MAX_ROUNDS,
-           provider: str | None = None, model: str | None = None) -> Iterator[dict]:
+           provider: str | None = None, model: str | None = None,
+           reasoning: str | None = None) -> Iterator[dict]:
     """history: [{"role": "user"|"assistant", "content": str}, ...] — 이전 turn.
     (LLM 두뇌 원칙과 무관: 대화 맥락 유지를 위한 것으로, tool 결과 자체는 여전히 provider 가 생성)
 
-    provider/model 을 안 주면 .env 의 기본값(LLM_PROVIDER 등)을 쓴다.
-    UI 에서 사용자가 두뇌를 바꾸면 매 호출마다 명시적으로 넘겨 즉시 반영한다."""
+    provider/model/reasoning 을 안 주면 .env 의 기본값(LLM_PROVIDER, LLM_REASONING)을 쓴다.
+    UI 에서 사용자가 두뇌를 바꾸면 매 호출마다 명시적으로 넘겨 즉시 반영한다.
+
+    reasoning: 추론 강도. provider 별 노브로 번역된다(config.reasoning_levels 참고).
+    """
     trimmed = (history or [])[-MAX_HISTORY_TURNS:]
     provider = (provider or config.LLM_PROVIDER).lower()
+    effort = config.resolve_reasoning(provider, reasoning)
     if provider == "anthropic":
-        yield from _answer_anthropic(question, trimmed, max_rounds, model)
+        yield from _answer_anthropic(question, trimmed, max_rounds, model, effort)
     elif provider == "openai":
-        yield from _answer_openai(question, trimmed, max_rounds, model)
+        yield from _answer_openai(question, trimmed, max_rounds, model, effort)
     else:
-        yield from _answer_gemini(question, trimmed, max_rounds, model)
+        yield from _answer_gemini(question, trimmed, max_rounds, model, effort)
 
 
 # ── Gemini (google-genai) ────────────────────────────────────────
@@ -224,7 +381,7 @@ def _to_gemini_params(js: dict) -> dict:
 
 
 def _answer_gemini(question: str, history: list[dict], max_rounds: int,
-                   model: str | None = None) -> Iterator[dict]:
+                   model: str | None = None, effort: str | None = None) -> Iterator[dict]:
     key = config.Keys.GEMINI
     if not key:
         yield {"type": "error", "text": "GEMINI_API_KEY 가 설정되지 않았습니다. .env 에 넣어주세요."}
@@ -242,12 +399,23 @@ def _answer_gemini(question: str, history: list[dict], max_rounds: int,
         )
         for t in registry.tool_schemas()
     ]
-    cfg = types.GenerateContentConfig(
-        system_instruction=_system_prompt(),
-        tools=[types.Tool(function_declarations=decls)],
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        temperature=0,
-    )
+    budget = _gemini_thinking(effort)
+
+    def _cfg(with_thinking: bool):
+        kw = dict(
+            system_instruction=_system_prompt(),
+            tools=[types.Tool(function_declarations=decls)],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            temperature=0,
+        )
+        if with_thinking and budget is not None:
+            kw["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+        return types.GenerateContentConfig(**kw)
+
+    cfg = _cfg(True)
+    # thinking_budget 허용범위는 모델마다 다르다(pro 는 0 을 못 받고 최소 128). 거부당하면
+    # 추론설정 없이 한 번 더 시도한다 — 강도 선택 때문에 답변 자체가 죽으면 안 된다.
+    thinking_dropped = False
     # 이전 turn (단순 텍스트만) → Gemini role: assistant=model, user=user
     contents = [
         types.Content(role=("model" if h.get("role") == "assistant" else "user"),
@@ -262,8 +430,22 @@ def _answer_gemini(question: str, history: list[dict], max_rounds: int,
                 model=model, contents=contents, config=cfg,
             )
         except Exception as e:  # noqa: BLE001
-            yield {"type": "error", "text": f"Gemini API 오류: {type(e).__name__}: {e}"}
-            return
+            if budget is not None and not thinking_dropped and _is_thinking_error(e):
+                thinking_dropped = True
+                cfg = _cfg(False)
+                yield {"type": "progress",
+                       "text": f"이 모델({model})은 추론강도 '{effort}' 를 받지 않아 "
+                               f"모델 기본값으로 진행합니다"}
+                try:
+                    resp = client.models.generate_content(
+                        model=model, contents=contents, config=cfg,
+                    )
+                except Exception as e2:  # noqa: BLE001
+                    yield {"type": "error", "text": f"Gemini API 오류: {type(e2).__name__}: {e2}"}
+                    return
+            else:
+                yield {"type": "error", "text": f"Gemini API 오류: {type(e).__name__}: {e}"}
+                return
 
         cand = resp.candidates[0] if resp.candidates else None
         parts = (cand.content.parts if cand and cand.content else None) or []
@@ -389,7 +571,7 @@ def _cli_tool_label(block: dict) -> str:
 
 
 def _answer_anthropic(question: str, history: list[dict] | None, max_rounds: int,
-                      model: str | None = None) -> Iterator[dict]:
+                      model: str | None = None, effort: str | None = None) -> Iterator[dict]:
     claude_exe = _resolve_claude_exe()
     if not claude_exe:
         yield {"type": "error",
@@ -410,7 +592,7 @@ def _answer_anthropic(question: str, history: list[dict] | None, max_rounds: int
     try:
         proc = subprocess.Popen(
             args, cwd=str(config.ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
+            text=True, encoding="utf-8", errors="replace", env=_claude_env(effort),
         )
     except OSError as e:
         yield {"type": "error", "text": f"claude CLI 실행 실패: {e}"}
@@ -449,7 +631,7 @@ def _answer_anthropic(question: str, history: list[dict] | None, max_rounds: int
 
 # ── OpenAI (GPT) ──────────────────────────────────────────────────
 def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
-                   model: str | None = None) -> Iterator[dict]:
+                   model: str | None = None, effort: str | None = None) -> Iterator[dict]:
     """/v1/responses 사용 (chat.completions 아님) — GPT-5.6 계열(Terra 등)은
     reasoning(기본 medium)과 function tools 를 chat.completions 에서 동시에 못 쓴다.
     /v1/responses 는 이 조합을 온전히 지원해서 reasoning_effort='none' 으로 낮출 필요가 없다."""
@@ -461,6 +643,7 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
         return
     model = model or config.OPENAI_MODEL
     client = openai.OpenAI(api_key=key)
+    rkw = _openai_reasoning_kwargs(model, effort)
 
     tools = [
         {"type": "function", "name": t["name"], "description": t["description"],
@@ -474,10 +657,25 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
         try:
             resp = client.responses.create(
                 model=model, instructions=_system_prompt(), input=input_list, tools=tools,
+                **rkw,
             )
         except openai.APIStatusError as e:
-            yield {"type": "error", "text": f"OpenAI API 오류 {e.status_code}: {e.message}"}
-            return
+            # 추론 인자를 안 받는 모델(커스텀 ID 등)이면 인자를 떼고 한 번 더 시도한다.
+            if rkw and _is_thinking_error(e):
+                rkw = {}
+                yield {"type": "progress",
+                       "text": f"이 모델({model})은 추론강도 인자를 받지 않아 기본값으로 진행합니다"}
+                try:
+                    resp = client.responses.create(
+                        model=model, instructions=_system_prompt(), input=input_list, tools=tools,
+                    )
+                except openai.APIStatusError as e2:
+                    yield {"type": "error",
+                           "text": f"OpenAI API 오류 {e2.status_code}: {e2.message}"}
+                    return
+            else:
+                yield {"type": "error", "text": f"OpenAI API 오류 {e.status_code}: {e.message}"}
+                return
         except openai.APIConnectionError as e:
             yield {"type": "error", "text": f"네트워크 오류: {e}"}
             return
@@ -513,7 +711,7 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
     try:
         resp = client.responses.create(
             model=model, instructions=_system_prompt(), input=input_list,
-            tools=tools, tool_choice="none",
+            tools=tools, tool_choice="none", **rkw,
         )
         text = getattr(resp, "output_text", None) or ""
     except Exception as e:  # noqa: BLE001

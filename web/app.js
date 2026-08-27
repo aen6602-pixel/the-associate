@@ -14,6 +14,8 @@ const state = {
   sessions: [],
   provider: null,
   model: null,
+  reasoning: null,
+  reasoningLabels: {},
   engines: [],
   busy: false,
 };
@@ -115,9 +117,11 @@ async function enterApp() {
   $('ephemeral-warn').hidden = !(data.deploy_mode && !data.persistent_storage);
 
   state.engines = data.engines;
+  state.reasoningLabels = data.reasoning_labels || {};
   state.provider = data.default_engine.provider;
   const eng = state.engines.find((e) => e.provider === state.provider) || state.engines[0];
   state.model = eng ? eng.default_model : null;
+  state.reasoning = eng ? eng.default_reasoning : null;
   renderEngine();
   renderSources(data.sources, data.roadmap);
   renderSkills(data.skills || []);
@@ -135,8 +139,9 @@ function renderEngine() {
   const eng = state.engines.find((e) => e.provider === state.provider);
   if (!eng) return;
 
+  const effortTag = state.reasoning ? ` · 추론 ${state.reasoning}` : '';
   $('engine-summary').textContent =
-    `🧠 Engine: ${eng.label} · ${state.model}  ${eng.connected ? '✅' : '⬜'}`;
+    `🧠 Engine: ${eng.label} · ${state.model}${effortTag}  ${eng.connected ? '✅' : '⬜'}`;
   $('engine-box').open = !eng.connected;
 
   const ps = $('provider-select');
@@ -153,6 +158,28 @@ function renderEngine() {
   const custom = $('model-custom');
   custom.hidden = known;
   if (!known) custom.value = state.model || '';
+
+  // 추론 강도 — provider 가 노브를 지원할 때만 보인다.
+  const levels = eng.reasoning_levels || [];
+  const rrow = $('reasoning-row');
+  const rsel = $('reasoning-select');
+  const rhint = $('reasoning-hint');
+  rrow.hidden = levels.length === 0;
+  rhint.hidden = levels.length === 0;
+  if (levels.length) {
+    if (!levels.includes(state.reasoning)) state.reasoning = eng.default_reasoning;
+    rsel.innerHTML = levels
+      .map((l) => {
+        const label = state.reasoningLabels[l] || l;
+        const dflt = l === eng.default_reasoning ? ' (기본)' : '';
+        return `<option value="${esc(l)}"${l === state.reasoning ? ' selected' : ''}>${esc(label)}${dflt}</option>`;
+      })
+      .join('');
+    rhint.textContent = '높이면 도구를 더 꼼꼼히 골라 다단계 밸류에이션에 유리하고, '
+      + '낮추면 단순 조회가 빨라집니다. 숫자는 어느 강도에서도 도구가 만듭니다.';
+  } else {
+    state.reasoning = null;
+  }
 
   const keyBox = $('engine-key');
   keyBox.className = `engine-key ${eng.connected ? 'ok' : 'no'}`;
@@ -173,6 +200,14 @@ $('provider-select').addEventListener('change', (e) => {
   state.provider = e.target.value;
   const eng = state.engines.find((x) => x.provider === state.provider);
   state.model = eng.default_model;
+  // 추론강도 어휘가 provider 마다 달라(gemini 는 dynamic, openai 는 minimal) 그대로 들고
+  // 넘어가면 서버가 400 을 낸다 → 새 provider 의 기본값으로 리셋한다.
+  state.reasoning = eng.default_reasoning;
+  renderEngine();
+});
+
+$('reasoning-select').addEventListener('change', (e) => {
+  state.reasoning = e.target.value;
   renderEngine();
 });
 
@@ -518,6 +553,7 @@ async function submitQuestion(question) {
       body: JSON.stringify({
         question, session_id: state.sessionId,
         provider: state.provider, model: state.model,
+        reasoning: state.reasoning,
       }),
     });
     if (!res.ok) {

@@ -16,7 +16,9 @@ description: 근거가 추적되는 기업가치평가를 설계, 계산, 검증
 - 조회할 수 있는 데이터는 먼저 조회한다. 찾을 수 없는 필수 정보와 사용자의 판단이 필요한 가정만 묻는다.
 - 숫자를 만들지 않는다. 미확인 값은 `미확인`, 적용할 수 없는 결과는 `NM`으로 표시하고 원인을 설명한다.
 - 사용자의 승인 범위는 Gate 1과 Gate 2 사이에서 추적한다. 승인되지 않은 가정이나 데이터 대체를 최종 보고서에 넣지 않는다.
-- 사용 가능한 데이터와 계산이 결론을 지지하지 못하면 범위를 좁히거나 결론 산출 불가로 종료한다.
+- 사용 가능한 데이터와 계산이 결론을 지지하지 못하면 범위를 좁히거나 결론 산출 불가로 종료한다. 이 규칙은 **주 결론(가치 또는 가치 범위)** 에만 적용한다. 비교표나 산출물의 일부 항목이 비는 것은 여기에 해당하지 않는다 — 그 항목만 `미확인`으로 표시하고 나머지는 산출한다. 산출물 전체를 포기하는 판단은 주 결론이 지지되지 않을 때만 내린다.
+- 방법론은 데이터가 아니라 **사업 실체**에 맞춘다. 단일 FCFF DCF 는 제조·서비스 단일 실체에만 적용한다. 캡티브 금융을 연결에 담은 회사는 SOTP로, 순수 금융회사는 지분 기준 평가로 라우팅한다. 연결 집계 계정을 구성 확인 없이 쓰면 운전자본·순부채·부채비중이 동시에 오염된다.
+- 도구가 없다는 것과 데이터가 없다는 것은 다르다. 전용 도구가 보이지 않으면 원자료 도구로 조립할 수 있는지 먼저 확인한다. 조립이 가능하면 그 경로를 쓰고, 불가능하면 무엇을 어떤 도구로 시도해 어떤 오류가 났는지 구체적으로 밝힌다.
 
 ## 절차
 
@@ -120,18 +122,27 @@ description: 근거가 추적되는 기업가치평가를 설계, 계산, 검증
 
 | 절차 단계 | 사용할 도구 |
 |---|---|
-| 2. 증거 가용성 | `get_financial_item`(+`_us`/`_jp`/`_tw`), `search_dart_filings`/`read_dart_filing`, `get_figi` |
+| 2. 증거 가용성 | `get_financial_history`(최근 N개년 — 연도를 찍지 않는다), `get_financial_item`(+`_us`/`_jp`/`_tw`), `get_market_cap`, `search_dart_filings`/`read_dart_filing`, `get_figi` |
+| 3. 적용 판단 | `get_business_mix` — 단일 FCFF DCF 적용 가능 여부(industrial / mixed / financial) |
 | 4. 자동 기준안 (DCF) | `get_dcf_assumptions`(성장·마진·D&A·CAPEX·ΔNWC 5개년), `get_net_debt`, `compute_wacc_auto`, `get_terminal_growth` |
-| 4. 자본비용 세부 | `get_beta`, `get_cost_of_debt`, `get_industry_benchmarks` |
+| 4. 자동 기준안 (Comps) | `compute_comps`(크로스보더·EV배수·LTM·공통 거래일을 엔진이 처리), 개별 확인은 `get_market_cap`·`get_ebitda`·`get_net_debt` |
+| 4. 자본비용 세부 | `get_beta`(R²<0.3이면 산업베타로 전환), `get_market_cost_of_debt`(WACC용 시장 Kd), `get_cost_of_debt`(실효 Kd·교차검증), `get_industry_benchmarks` |
 | 4. 본계산 | `compute_dcf`, `compute_comps`, `evaluate_sangjeung_value` |
-| 6. 검증 | `compute_dcf` 결과 note 의 `⚠️ [검증 경고]` 를 반드시 확인 |
+| 6. 검증 | `compute_dcf`·`compute_comps` 결과 note 의 `⚠️` 경고를 반드시 확인해 보고서에 옮긴다 |
 
 주의:
 - 이 앱에는 코드 실행·스프레드시트가 없다. 산식 재현은 engine 이 돌려주는 note 와 extras
   (연도별 내역, EV/지분가치 bridge)를 인용해서 보인다.
+- 연도 인자(`year`)는 **생략이 기본**이다 — provider 가 공시가 존재하는 최신 사업연도를 찾는다.
+  오늘 날짜에서 연도를 역산해 넣지 않는다. 다년치가 필요하면 `get_financial_history` 를 쓴다.
 - `get_dcf_assumptions` 는 **과거 5개년 평균**이다. 절차서가 금지하는 "과거 평균의 자동 채택"에
   해당하므로, 그대로 쓰지 말고 정상화가 필요한지 판단해 Gate 1 또는 검토 라운드에서 다룬다.
-- 해외 기업은 `country`·`market`·`symbol`·`industry` 를 함께 넘겨야 한다(DART 는 한국 전용).
+- 해외 기업의 자본비용(`compute_wacc_auto`·`get_beta`)에는 `country`·`market`·`symbol`·
+  `industry` 를 함께 넘긴다(DART 는 한국 전용). 반면 시가총액·재무·순부채·EBITDA·comps 는
+  `market` 코드만 주면 되고 종목코드·Yahoo 티커는 엔진이 유도한다.
+- 크로스보더 비교표는 `compute_comps` 하나로 만든다. 항목마다 `'MU:US'` 처럼 시장을 붙이고,
+  비교표 자체가 산출물이면 `target` 은 비운다. 기준일·기준기간·통화 정렬과 기준 불일치
+  경고는 엔진이 만들어 주며, 그 경고를 보고서에 그대로 옮기는 것이 검증의 일부다.
 - 최종 보고서는 대화 답변으로 작성한다. 파일은 사용자가 답변 아래 버튼으로 내려받는다 —
   **📄 HTML 리포트**(질문·답변·출처 전체) 및 계산한 방법에 대응하는 엑셀(**DCF 전체 모델
   5시트 / DCF 요약 / Comps / 상증법**). 엑셀은 입력이 파란 셀, 계산이 수식이고 '출처' 시트가

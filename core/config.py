@@ -58,6 +58,27 @@ def detect_deploy_mode(env: dict[str, str] | None = None) -> bool:
 
 
 DEPLOY_MODE = detect_deploy_mode()
+# ── 추론 강도(reasoning effort) ─────────────────────────────────────
+# 밸류에이션은 "도구를 몇 개, 어떤 순서로 부를지" 를 정하는 다단계 추론이라 추론 강도가
+# 답변 품질에 직결된다(낮추면 도구 호출을 건너뛰고 결론으로 점프하는 경향). 반대로 단순
+# 조회에는 과한 비용이므로 UI 에서 고를 수 있게 한다.
+#
+# provider 마다 노브가 다르다:
+#   OpenAI   /v1/responses 의 reasoning.effort (minimal|low|medium|high)
+#   Gemini   thinking_config.thinking_budget (토큰수, 0=끔, -1=모델 자율)
+#   Anthropic claude CLI 의 MAX_THINKING_TOKENS 환경변수
+# 그래서 공통 어휘(off/minimal/low/medium/high/dynamic)를 두고 provider 별로 번역한다.
+LLM_REASONING = (os.getenv("LLM_REASONING") or "").strip().lower() or None
+
+REASONING_LABELS = {
+    "off": "끔 (추론 없음, 가장 빠름)",
+    "minimal": "최소 (단순 조회용)",
+    "low": "낮음",
+    "medium": "보통 (권장)",
+    "high": "높음 (다단계 밸류에이션)",
+    "dynamic": "모델 자율 (분량을 모델이 판단)",
+}
+
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
@@ -69,6 +90,10 @@ LLM_PROVIDERS: dict[str, dict] = {
         "label": "Google Gemini", "key_attr": "GEMINI",
         "env_model_var": "GEMINI_MODEL", "default_model": GEMINI_MODEL,
         "presets": ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
+        # thinking_budget 토큰. flash 는 0(끔)~24576, pro 는 0 을 못 받고 최소 128 이라
+        # off 를 고르면 API 가 거부할 수 있다 → brain 이 실패 시 thinking_config 없이 재시도한다.
+        "reasoning_levels": ["off", "low", "medium", "high", "dynamic"],
+        "default_reasoning": "dynamic",
     },
     "openai": {
         "label": "OpenAI GPT", "key_attr": "OPENAI",
@@ -78,6 +103,10 @@ LLM_PROVIDERS: dict[str, dict] = {
         # 성능은 근접, Luna 는 'low-reasoning' 명시라 이런 다단계 조사엔 부적합).
         "presets": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna",
                    "gpt-5-nano", "gpt-4o-mini", "gpt-5-mini", "gpt-5", "gpt-4.1-mini"],
+        # gpt-4o/4.1 계열은 추론 모델이 아니라 reasoning 인자를 거부한다 → brain 이
+        # 추론 모델(gpt-5*, o1/o3/o4*)에만 인자를 붙인다.
+        "reasoning_levels": ["minimal", "low", "medium", "high"],
+        "default_reasoning": "medium",
     },
     "anthropic": {
         # API 키가 아니라 로그인된 Claude Code CLI(Enterprise 구독)를 서브프로세스로 재활용한다
@@ -85,39 +114,78 @@ LLM_PROVIDERS: dict[str, dict] = {
         "label": "Anthropic Claude (CLI)", "key_attr": None, "auth_mode": "cli",
         "env_model_var": "ANTHROPIC_MODEL", "default_model": ANTHROPIC_MODEL,
         "presets": ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5"],
+        "reasoning_levels": ["off", "low", "medium", "high"],
+        "default_reasoning": "medium",
     },
 }
 
 
-def resolve_llm(provider: str, model: str | None = None) -> dict:
+def reasoning_levels(provider: str) -> list[str]:
+    """그 provider 가 받을 수 있는 추론 강도 목록. 빈 목록이면 노브가 없다는 뜻."""
+    return list(LLM_PROVIDERS.get(provider, {}).get("reasoning_levels") or [])
+
+
+def default_reasoning(provider: str) -> str | None:
+    """기본 추론 강도. .env 의 LLM_REASONING 이 그 provider 에서 유효하면 그것을 우선한다."""
+    levels = reasoning_levels(provider)
+    if not levels:
+        return None
+    if LLM_REASONING in levels:
+        return LLM_REASONING
+    return LLM_PROVIDERS[provider].get("default_reasoning") or levels[0]
+
+
+def resolve_reasoning(provider: str, reasoning: str | None) -> str | None:
+    """사용자가 고른 값을 검증한다. 지원하지 않는 값이면 **조용히 무시하지 않고** 기본값으로
+    떨어뜨린다 — 서버가 400 으로 거를 수 있게 is_valid_reasoning 을 따로 둔다."""
+    levels = reasoning_levels(provider)
+    if not levels:
+        return None
+    want = (reasoning or "").strip().lower()
+    return want if want in levels else default_reasoning(provider)
+
+
+def is_valid_reasoning(provider: str, reasoning: str | None) -> bool:
+    """None(미지정)은 유효 — 기본값을 쓴다는 뜻."""
+    if reasoning is None or not str(reasoning).strip():
+        return True
+    return str(reasoning).strip().lower() in reasoning_levels(provider)
+
+
+def resolve_llm(provider: str, model: str | None = None,
+                reasoning: str | None = None) -> dict:
     """provider(+선택 model) → {provider, model, key, key_name, label}.
     UI 에서 사용자가 고른 두뇌를 조회할 때 쓴다 (LLM_PROVIDER 기본값과 무관하게 임의 provider 조회 가능).
     auth_mode='cli' 인 provider(현재 anthropic)는 API 키 대신 로그인된 claude CLI 존재 여부를 'key'로 반환."""
     p = LLM_PROVIDERS.get(provider, LLM_PROVIDERS["gemini"])
+    resolved = provider if provider in LLM_PROVIDERS else "gemini"
+    common = {
+        "provider": resolved,
+        "label": p["label"],
+        "model": model or p["default_model"],
+        "presets": p["presets"],
+        "reasoning_levels": p.get("reasoning_levels", []),
+        "default_reasoning": default_reasoning(resolved),
+        "reasoning": resolve_reasoning(resolved, reasoning),
+    }
     if p.get("auth_mode") == "cli":
         import shutil
 
         return {
-            "provider": provider if provider in LLM_PROVIDERS else "gemini",
-            "label": p["label"],
-            "model": model or p["default_model"],
+            **common,
             "key": shutil.which("claude") or "",  # 존재하면 truthy → "연결됨" 표시(app.py 재사용)
             "key_name": "claude CLI (Enterprise 구독 로그인, API 키 불필요)",
-            "presets": p["presets"],
         }
     key_attr = p["key_attr"]
     return {
-        "provider": provider if provider in LLM_PROVIDERS else "gemini",
-        "label": p["label"],
-        "model": model or p["default_model"],
+        **common,
         "key": getattr(Keys, key_attr, None),
         "key_name": f"{key_attr}_API_KEY",
-        "presets": p["presets"],
     }
 
 
 def active_llm() -> dict:
-    """.env 의 LLM_PROVIDER 기본값 기준 {provider, model, key, key_name} 반환."""
+    """.env 의 LLM_PROVIDER 기본값 기준 {provider, model, key, key_name, reasoning} 반환."""
     return resolve_llm(LLM_PROVIDER)
 
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import io
 import warnings
-from functools import lru_cache
+from core.cache import TTL_INDEX, ttl_cache
 from typing import Optional
 
 import pandas as pd
@@ -39,7 +39,7 @@ def _norm(s) -> str:
     return str(s).strip().lower()
 
 
-@lru_cache(maxsize=1)
+@ttl_cache(TTL_INDEX, maxsize=1)
 def _load() -> tuple[pd.DataFrame, str, Optional[str]]:
     """Regional breakdown 시트 + 갱신일자를 로드/캐시."""
     with warnings.catch_warnings():

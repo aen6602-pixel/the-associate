@@ -26,7 +26,7 @@ import re
 import zipfile
 import difflib
 from datetime import date, timedelta
-from functools import lru_cache
+from core.cache import TTL_FRESH, TTL_INDEX, ttl_cache
 
 from core.schema import Provenance, Value, DataError, SourceType
 from core.http import get_bytes, get_json
@@ -38,19 +38,35 @@ _CODELIST_URL = "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/codelist/
 _ANNUAL_REPORT_DOC_TYPE = "120"  # 有価証券報告書
 
 # item 키 → (kind: duration(기간)|instant(시점), [XBRL 태그 후보, 우선순위순])
+# ⚠️ 태그는 **로컬명**(콜론 뒤)으로 매칭한다. 네임스페이스를 고정하면 안 된다 —
+# IFRS 채택 일본기업은 핵심 손익을 **회사별 확장 태그**로 낸다. 실측 2026-08-27 Toyota
+# (docID S100Y8NY, FY2026):
+#     jpcrp030000-asr_E02144-000:OperatingRevenuesIFRSKeyFinancialData = 50,684,952백만엔 (연결)
+#     jpcrp030000-asr_E02144-000:TotalNetRevenuesIFRS                 = 50,684,952백만엔 (연결)
+#     jpcrp_cor:NetSalesSummaryOfBusinessResults                      = 18,259,979백만엔 (개별)
+# 네임스페이스에 EDINET 코드(E02144)가 박혀 있어 고정 목록으로는 영원히 못 잡고, 그래서
+# 예전에는 유일하게 매칭되던 jpcrp_cor 개별값(18.28조엔)이 '연결 매출'로 나왔다.
+# 순서도 중요하다 — SummaryOfBusinessResults 계열은 개별(비연결) 컨텍스트로만 태깅되는
+# 경우가 많으므로 **맨 뒤**에 둔다.
 ITEM_MAP: dict[str, tuple] = {
-    "revenue": ("duration", ["jpigp_cor:RevenueIFRS", "jpigp_cor:Revenue",
-                             "jpcrp_cor:NetSalesSummaryOfBusinessResults", "jppfs_cor:NetSales"]),
-    "operating_income": ("duration", ["jpigp_cor:OperatingProfitLossIFRS", "jppfs_cor:OperatingIncome"]),
-    "net_income": ("duration", ["jpigp_cor:ProfitLossAttributableToOwnersOfParentIFRS",
-                                "jpigp_cor:ProfitLossIFRS", "jppfs_cor:ProfitLoss",
-                                "jpcrp_cor:NetIncomeLossSummaryOfBusinessResults"]),
-    "total_assets": ("instant", ["jpigp_cor:AssetsIFRS", "jppfs_cor:Assets",
-                                 "jpcrp_cor:TotalAssetsIFRSSummaryOfBusinessResults",
-                                 "jpcrp_cor:TotalAssetsSummaryOfBusinessResults"]),
-    "total_liabilities": ("instant", ["jpigp_cor:LiabilitiesIFRS", "jppfs_cor:Liabilities"]),
-    "total_equity": ("instant", ["jpigp_cor:EquityIFRS", "jpigp_cor:EquityAttributableToOwnersOfParentIFRS",
-                                 "jppfs_cor:NetAssets", "jpcrp_cor:NetAssetsSummaryOfBusinessResults"]),
+    "revenue": ("duration", ["OperatingRevenuesIFRSKeyFinancialData", "TotalNetRevenuesIFRS",
+                             "RevenueIFRS", "SalesRevenuesIFRS", "Revenue",
+                             "NetSalesIFRSKeyFinancialData", "NetSalesKeyFinancialData",
+                             "NetSalesSummaryOfBusinessResults", "NetSales"]),
+    "operating_income": ("duration", ["OperatingProfitLossIFRS", "OperatingIncomeIFRS",
+                                      "OperatingIncomeLossIFRSKeyFinancialData",
+                                      "OperatingIncome", "OperatingIncomeLoss"]),
+    "net_income": ("duration", ["ProfitLossAttributableToOwnersOfParentIFRS",
+                                "ProfitLossAttributableToOwnersOfParentIFRSKeyFinancialData",
+                                "ProfitLossIFRS", "ProfitLoss",
+                                "NetIncomeLossSummaryOfBusinessResults"]),
+    "total_assets": ("instant", ["AssetsIFRS", "TotalAssetsIFRSKeyFinancialData", "Assets",
+                                 "TotalAssetsIFRSSummaryOfBusinessResults",
+                                 "TotalAssetsSummaryOfBusinessResults"]),
+    "total_liabilities": ("instant", ["LiabilitiesIFRS", "Liabilities"]),
+    "total_equity": ("instant", ["EquityAttributableToOwnersOfParentIFRS", "EquityIFRS",
+                                 "TotalEquityIFRSKeyFinancialData", "NetAssets",
+                                 "NetAssetsSummaryOfBusinessResults"]),
 }
 ITEM_LABEL = {
     "revenue": "매출액(수익)", "operating_income": "영업이익", "net_income": "당기순이익",
@@ -73,7 +89,7 @@ def _norm_en(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
-@lru_cache(maxsize=1)
+@ttl_cache(TTL_INDEX, maxsize=1)
 def _company_index() -> tuple[dict, dict, dict]:
     """EdinetCode 목록 → (증권코드→entry, 정규화영문명→entry, 일문명→entry)."""
     raw = get_bytes(_CODELIST_URL, ttl_hours=24 * 7)
@@ -278,7 +294,8 @@ def _parse_val(s: str, unit_id: str) -> int | None:
     return -v if neg else v
 
 
-@lru_cache(maxsize=64)
+# docID 하나의 내용은 불변이라 TTL 이 짧을 필요는 없다 — 메모리 회수 목적.
+@ttl_cache(TTL_INDEX, maxsize=64)
 def _doc_rows(docid: str) -> tuple[dict, ...]:
     """유가증권보고서 CSV(type=5) 전체를 파싱해 (tag, item_nm, ctx, relyear, unit_id, val, text)
     행 목록으로. text 는 원본 문자열 그대로 — 숫자 계정은 val 로 파싱되지만, 서술문
@@ -304,20 +321,33 @@ def _doc_rows(docid: str) -> tuple[dict, ...]:
     return tuple(rows)
 
 
+def _local(tag: str) -> str:
+    """네임스페이스를 떼고 로컬명만. 'jpcrp030000-asr_E02144-000:TotalNetRevenuesIFRS'
+    → 'TotalNetRevenuesIFRS'."""
+    return (tag or "").rsplit(":", 1)[-1]
+
+
 def _find_value(rows: tuple, tags: list[str], kind: str, idx: int = 0):
-    """tags 우선순위대로 탐색. 연결(컨텍스트에 _NonConsolidatedMember 없음) 우선,
-    없으면 개별로 fallback. 반환: (row, tag, '연결'|'개별(비연결)') 또는 (None, None, None)."""
+    """tags(로컬명) 우선순위대로 탐색. **연결 우선, 태그 우선순위보다 연결이 먼저다.**
+
+    반환: (row, tag, '연결'|'개별(비연결)') 또는 (None, None, None).
+    회사별 확장 네임스페이스를 허용하려고 로컬명으로 비교한다(위 ITEM_MAP 주석 참고).
+    """
     label = _relyear(kind, idx)
-    matched = [r for tag in tags for r in rows
-              if r["tag"] == tag and r["relyear"] == label and _CTX_RE.match(r["ctx"])]
-    for tag in tags:
-        cons = [r for r in matched if r["tag"] == tag and not r["ctx"].endswith("_NonConsolidatedMember")]
+    wanted = [_local(t) for t in tags]
+    cand = [r for r in rows
+            if _local(r["tag"]) in wanted and r["relyear"] == label
+            and _CTX_RE.match(r["ctx"]) and r["val"] is not None]
+    for name in wanted:
+        cons = [r for r in cand if _local(r["tag"]) == name
+                and not r["ctx"].endswith("_NonConsolidatedMember")]
         if cons:
-            return cons[0], tag, "연결"
-    for tag in tags:
-        indiv = [r for r in matched if r["tag"] == tag and r["ctx"].endswith("_NonConsolidatedMember")]
+            return cons[0], cons[0]["tag"], "연결"
+    for name in wanted:
+        indiv = [r for r in cand if _local(r["tag"]) == name
+                 and r["ctx"].endswith("_NonConsolidatedMember")]
         if indiv:
-            return indiv[0], tag, "개별(비연결)"
+            return indiv[0], indiv[0]["tag"], "개별(비연결)"
     return None, None, None
 
 
@@ -344,13 +374,20 @@ def financial_item(company: str, item: str, year: int | None = None) -> Value:
             source_url=f"{_BASE}/documents/{doc['docID']}",
             original_field=f"XBRL要素ID: {tag}",
             as_of=f"FY{fy}", filing_date=filing_date,
-            note=f"EDINETコード={ent['edinet_code']}, docID={doc['docID']}, 기준={basis}",
+            note=(f"EDINETコード={ent['edinet_code']}, docID={doc['docID']}, 기준={basis}"
+                  + ("" if basis == "연결" else
+                     " ⚠️ [개별(비연결) 기준] 연결 컨텍스트에서 이 항목을 찾지 못했습니다 — "
+                     "그룹 규모를 나타내지 않으므로 비교표·배수·밸류에이션에 그대로 쓰면 "
+                     "안 됩니다(Toyota 실측: 개별 18.3조엔 vs 연결 50.7조엔). 값을 인용할 "
+                     "때 반드시 '개별 기준' 을 함께 표기하세요.")),
         ),
     )
 
 
-def financial_item_multiyear(company: str, item: str, year: int | None = None) -> dict:
-    """엔진용: 최근 3개년(당기/전기/전전기) 시리즈."""
+def financial_item_multiyear(company: str, item: str, year: int | None = None,
+                             n: int = 3) -> dict:
+    """엔진용: 최근 n개년 시리즈. 유가증권보고서 하나에 담기는 한계가 5개년(当期~四期前)이라
+    n>5 는 5로 자른다. year 를 주지 않으면 **가장 최근 유가증권보고서**를 앵커로 쓴다."""
     if item not in ITEM_MAP:
         raise DataError(f"지원하지 않는 항목: {item}")
     kind, tags = ITEM_MAP[item]
@@ -360,11 +397,11 @@ def financial_item_multiyear(company: str, item: str, year: int | None = None) -
     rows = _doc_rows(doc["docID"])
     series = []
     basis_used = None
-    for i in range(3):
+    for i in range(min(max(1, int(n)), len(_RELYEAR_DURATION))):
         row, tag, basis = _find_value(rows, tags, kind, i)
         if row is None or row["val"] is None:
             continue
-        series.append({"period": f"FY{fy - i}", "amount": row["val"]})
+        series.append({"period": f"FY{fy - i}", "year": fy - i, "amount": row["val"]})
         basis_used = basis_used or basis
     if not series:
         raise DataError(f"{ent['name_en'] or ent['name_ja']}: '{ITEM_LABEL[item]}' 연간 데이터를 못 찾음")

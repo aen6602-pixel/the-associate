@@ -14,6 +14,7 @@
 <div class="splash" id="splash">
   <div class="splash-inner">
     <div class="wordmark">THE ASSOCIATE</div>
+    <div class="byline">by. Martin Lee</div>
     <div class="rule"></div>
     <div class="tagline">Every figure, traced to its source.</div>
     <div class="loading">
@@ -28,6 +29,7 @@
 <div class="gate" id="gate" hidden>
   <div class="gate-box">
     <div class="wordmark sm">THE ASSOCIATE</div>
+    <div class="byline sm">by. Martin Lee</div>
     <div class="rule"></div>
     <div class="tagline">Every figure, traced to its source.</div>
     <div class="gate-form">
@@ -77,6 +79,10 @@
           <select id="model-select"></select>
         </label>
         <input type="text" id="model-custom" placeholder="예: gpt-5, gemini-2.5-pro" hidden>
+        <label id="reasoning-row"><span>추론 강도</span>
+          <select id="reasoning-select"></select>
+        </label>
+        <p class="hint" id="reasoning-hint"></p>
         <p class="engine-key" id="engine-key"></p>
       </div>
     </details>
@@ -94,21 +100,28 @@
   <main class="main">
     <button class="ghost sm sidebar-toggle" id="sidebar-toggle" title="사이드바">☰</button>
     <div class="content">
-      <h1>The Associate</h1>
+      <h1>The Associate<span class="by">by. Martin Lee</span></h1>
       <p class="lede">Your AI valuation associate — the work an investment bank or accounting
         firm would run, on demand.</p>
-      <p class="lede">Every figure traces back to a public source. No fabricated numbers.
-        No hallucinations.</p>
+      <p class="lede">Every figure traces back to a public source. No fabricated numbers,
+        no hallucinations — and it will tell you when the data is not there, or refuse when
+        you ask it to work backwards from a target price.</p>
 
       <p class="warn box" id="engine-warn" hidden></p>
 
       <ul class="caps" id="caps">
-        <li>Pull primary disclosures straight from the filing — Korea, the U.S., Japan and
-          Taiwan — and read the financials line by line, footnotes included.</li>
-        <li>Mark the inputs that actually move a valuation — risk-free curves, equity risk
-          premia, corporate tax and country risk, Beta — off the Bank of Korea, FRED and Damodaran.</li>
-        <li>Put it to work in whatever the situation calls for — DCF, trading comps, and
-          Korean statutory appraisal — with every number tied back to where it came from.</li>
+        <li>Pull primary disclosures straight from the filing — Korea (DART), the U.S. (SEC
+          EDGAR) and Japan (EDINET) — and read the financials line by line, footnotes
+          included. Taiwan runs off a market-data provider, and every figure says so.</li>
+        <li>Mark the inputs that actually move a valuation — risk-free curves, credit spreads
+          by rating, equity risk premia, corporate tax and country risk, Beta with its
+          explanatory power — off the Bank of Korea, FRED and Damodaran.</li>
+        <li>Put it to work in whatever the situation calls for — DCF, cross-border trading
+          comps on a single trading day and LTM basis, and Korean statutory appraisal — with
+          every number tied back to where it came from.</li>
+        <li>Refuse the valuation that does not hold. A captive-finance parent does not get a
+          single-entity DCF, a lender does not get an EV multiple, and a negative equity
+          value is reported as NM rather than dressed up as a price.</li>
       </ul>
 
       <div class="chat" id="chat"></div>

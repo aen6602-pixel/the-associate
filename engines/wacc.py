@@ -93,14 +93,19 @@ def market_debt_to_value(company: str, year: int | None = None,
     dv = ibd / v
     f = lambda x: f"{x:,.0f}"  # noqa: E731
     return Value(
-        round(dv, 4), "비율", label=f"{ent['corp_name']} 목표부채비중 D/(D+E) (시장가치)",
+        round(dv, 4), "비율",
+        label=f"{ent['corp_name']} 현재 레버리지 D/(D+E) (spot, 시장가치)",
         provenance=Provenance(
             source="계산엔진(engines.wacc)", source_type=SourceType.COMPUTED,
             source_url="(computed: DART 차입금 + 네이버 시가총액)",
             as_of=mcap.provenance.as_of,
             note=(f"IBD {f(ibd)} ÷ (IBD + 시가총액 {f(mcap.value)}) = {dv * 100:.2f}%. "
                   f"자본은 장부가가 아닌 시가총액 기준"
-                  + (" (리스부채 포함)" if include_lease and lease else "") + "."),
+                  + (" (리스부채 포함)" if include_lease and lease else "")
+                  + ". ⚠️ 이것은 **평가시점의 순간(spot) 레버리지**이지 목표자본구조가 아니다 — "
+                    "주가가 급등한 시점에는 자기자본 비중이 과대해져(SK하이닉스 실측 D/V "
+                    "1.88%) WACC 이 구조적으로 높게 나온다. WACC 의 target 으로는 산업 "
+                    "median(get_industry_benchmarks) 을 기본으로 쓰고, spot 은 교차검증에 쓴다."),
         ),
         extras={"market_cap": mcap},
     )
@@ -156,13 +161,21 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
         kd_v, kd = None, float(cost_of_debt_pct)
         steps.append(f"Kd {kd}% (직접 지정)")
     elif domestic:
-        kd_v = dcf_inputs.cost_of_debt(company)
-        kd = kd_v.value
+        # P1-2: 기본을 **시장 Kd**(ECOS 등급별 회사채 유통수익률)로 바꿨다. 실효 Kd 는 과거
+        # 조달금리의 가중평균이라 Rf 보다 낮아지는 역전이 나온다(SK하이닉스 실측 3.79% <
+        # Rf 4.288% → 신용스프레드가 음수). 시장 Kd 가 실패하면 실효 Kd 로 폴백한다.
+        try:
+            kd_v = dcf_inputs.market_cost_of_debt(company, country=c)
+            kd = kd_v.value
+            steps.append(f"Kd {kd}% (ECOS 등급별 회사채 = 시장 신규조달금리)")
+        except DataError:
+            kd_v = dcf_inputs.cost_of_debt(company)
+            kd = kd_v.value
+            steps.append(f"Kd {kd}% (실효 이자비용÷IBD — 시장 Kd 조회 실패)")
         if not 0.3 <= kd <= 15:
             raise DataError(
-                f"공시에서 계산한 Kd {kd}% 가 통상 범위(0.3~15%)를 벗어납니다 "
+                f"Kd {kd}% 가 통상 범위(0.3~15%)를 벗어납니다 "
                 f"({kd_v.provenance.note}). cost_of_debt_pct 를 직접 지정하거나 산업평균을 쓰세요.")
-        steps.append(f"Kd {kd}% (공시 이자비용÷IBD)")
     else:
         kd_v = _industry_or_fail("타인자본비용")["cost_of_debt"]
         kd = kd_v.value
@@ -172,15 +185,25 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
     if debt_to_value is not None:
         dv_v, dv = None, float(debt_to_value)
         steps.append(f"D/(D+E) {dv:.4f} (직접 지정)")
-    elif debt_ratio_source == "industry" or not domestic:
-        dv_v = _industry_or_fail("목표 부채비중")["debt_to_value"]
-        dv = dv_v.value
-        steps.append(f"D/(D+E) {dv:.4f} ({region} 산업평균)")
-    else:
+    elif debt_ratio_source in ("industry", "auto") or not domestic:
+        # P1-1: 기본값을 산업 median 으로 바꿨다. 예전 기본(auto=국내는 시장가치 우선)은
+        # 순간 레버리지를 'target' 이라 부르는 것이어서 IB 리뷰에서 반드시 지적된다.
+        # spot 을 쓰려면 debt_ratio_source='spot' 을 명시해야 한다.
+        try:
+            dv_v = _industry_or_fail("목표 부채비중")["debt_to_value"]
+            dv = dv_v.value
+            steps.append(f"D/(D+E) {dv:.4f} ({region} 산업 median, target)")
+        except DataError:
+            if not domestic:
+                raise
+            dv_v = market_debt_to_value(company)
+            dv = dv_v.value
+            steps.append(f"D/(D+E) {dv:.4f} (industry 미지정 → spot 시장가치로 대체)")
+    else:   # debt_ratio_source == "spot"
         try:
             dv_v = market_debt_to_value(company)
             dv = dv_v.value
-            steps.append(f"D/(D+E) {dv:.4f} (시장가치)")
+            steps.append(f"D/(D+E) {dv:.4f} (spot 시장가치 — target 아님)")
         except DataError as e:
             if not industry:
                 raise DataError(f"{e}") from e
@@ -189,6 +212,20 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
             steps.append(f"D/(D+E) {dv:.4f} (시가총액 없음 → 산업평균)")
 
     base = compute_wacc(c, beta, kd, dv, tenor, risk_free_pct)
+
+    # 금융부문 보유사는 D/V·Kd 자체가 오염된다 → 경고를 WACC note 에 실어 보낸다.
+    mix_note = ""
+    if domestic:
+        try:
+            from engines import business_mix
+
+            mix = business_mix.classify(company, None, "CFS", deep=False)
+            if not mix["single_dcf_ok"]:
+                mix_note = (f" ⚠️ [금융부문 오염] {mix['reason']} 연결 IBD 로 만든 부채비중과 "
+                            f"이자비용으로 만든 Kd 는 제조부문 자본비용이 아닙니다.")
+        except Exception:  # noqa: BLE001
+            pass
+
     extras = {"beta": beta_v, "cost_of_debt": kd_v, "debt_to_value": dv_v}
     return Value(
         base.value, "%", label=f"{company} WACC (자동)",
@@ -196,7 +233,11 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
             source="계산엔진(engines.wacc · 자동 도출)", source_type=SourceType.COMPUTED,
             source_url="(computed: 공시·시세에서 β·Kd·자본구조 자동 도출)",
             as_of=base.provenance.as_of,
-            note="입력: " + " / ".join(steps) + ". " + (base.provenance.note or ""),
+            note=("입력: " + " / ".join(steps) + ". " + (base.provenance.note or "")
+                  + mix_note
+                  + " [정합성] WACC 의 D/(D+E) 와 DCF 의 순부채 차감은 같은 부채 정의"
+                    "(이자발생부채 + 리스부채)를 써야 합니다 — get_net_debt 결과와 위 IBD 가 "
+                    "다르면 그 차이를 먼저 설명해야 합니다."),
         ),
         extras={k: v for k, v in extras.items() if v is not None},
     )

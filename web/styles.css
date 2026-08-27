@@ -61,6 +61,16 @@ button:disabled { opacity: .5; cursor: default; }
   color: var(--amber);
 }
 .wordmark.sm { font-size: 1.6rem; letter-spacing: .3em; padding-left: .3em; }
+
+/* 제작자 크레딧 — 워드마크의 정확히 절반 크기(2.2rem → 1.1rem). letter-spacing 도 절반으로
+   줄여 워드마크와 시각적 무게를 분리한다. padding-left 는 letter-spacing 이 마지막 글자
+   뒤에도 붙어 생기는 오른쪽 여백을 보정해 가운데 정렬을 맞추는 것(워드마크와 같은 방식). */
+.byline {
+  margin-top: .55rem; font-size: 1.1rem; font-weight: 500;
+  letter-spacing: .19em; padding-left: .19em;
+  color: var(--amber); opacity: .62;
+}
+.byline.sm { font-size: .8rem; letter-spacing: .15em; padding-left: .15em; margin-top: .45rem; }
 .rule { width: 0; height: 1px; margin: 1.1rem auto 0; background: var(--amber); opacity: .5;
         animation: ruleGrow 1.4s ease .3s forwards; }
 .tagline { margin-top: 1rem; color: var(--text-mute); letter-spacing: .06em; font-size: .95rem; }
@@ -182,6 +192,11 @@ button:disabled { opacity: .5; cursor: default; }
 .sidebar-toggle { position: absolute; top: .7rem; left: .7rem; z-index: 5; display: none; }
 .content { flex: 1; overflow-y: auto; padding: 2rem 2.2rem 1rem; }
 .content > h1 { font-size: 2.1rem; font-weight: 600; margin: 0 0 .7rem; letter-spacing: -.01em; }
+/* h1 옆 크레딧 — h1 의 절반 크기. baseline 을 h1 에 맞추지 않고 살짝 띄워 붙는 느낌을 준다. */
+.content > h1 .by {
+  margin-left: .6rem; font-size: 1.05rem; font-weight: 500; letter-spacing: 0;
+  color: var(--amber); opacity: .62; white-space: nowrap;
+}
 .lede { font-size: 1.1rem; line-height: 1.62; color: var(--text-dim); max-width: 840px;
         margin: .15rem 0 .55rem; }
 
@@ -373,5 +388,7 @@ button:disabled { opacity: .5; cursor: default; }
   .content { padding: 3.2rem 1.1rem 1rem; }
   .composer { padding: .8rem 1.1rem 1.1rem; }
   .content > h1 { font-size: 1.7rem; }
+  .content > h1 .by { font-size: .85rem; margin-left: .45rem; }
+  .byline { font-size: .95rem; }
   .lede, .caps li { font-size: 1rem; }
 }

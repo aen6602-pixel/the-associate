@@ -18,7 +18,7 @@
 """
 from __future__ import annotations
 
-from statistics import mean
+from statistics import mean, median
 
 from core.schema import DataError, Provenance, SourceType, Value
 from providers import damodaran, dart, dart_audit, ecos, fred
@@ -79,12 +79,41 @@ def net_debt(company: str, year: int | None = None, include_lease: bool = True,
             f"− 현금및현금성자산 {f(cash.value)} = 순부채 {f(nd)}"
             f"{' → 순현금 상태' if nd < 0 else ''}"
             + ("" if include_lease else " (리스부채 제외)"))
+    # 캡티브 금융 보유사의 연결 IBD 에는 금융부문 조달이 전부 들어 있다. 이 값을 EV 에서
+    # 그대로 차감하면 과다차감이 되므로(현대자동차 실측: IBD 131조 중 상당액이 금융부문)
+    # 값을 감추지 않고 **오염 사실을 같이 실어 보낸다**.
+    note += _finance_arm_note(company, year, prefer)
     return _computed(nd, "KRW", f"{db['short_term'].label.split(' 단기')[0]} 순부채",
                      note, cash.provenance.as_of,
                      extras={"interest_bearing_debt": _computed(
                          ibd, "KRW", "이자발생부채(IBD)",
                          f"단기 {f(st)} + 장기 {f(lt)}{lease_txt}", cash.provenance.as_of),
                              "cash": cash})
+
+
+def _finance_arm_note(company: str, year: int | None, prefer: str) -> str:
+    """금융부문 보유 판정 결과를 note 문구로. 판정 실패는 빈 문자열(계산을 막지 않는다)."""
+    try:
+        from engines import business_mix
+
+        d = business_mix.classify(company, year, prefer, deep=False)
+    except Exception:  # noqa: BLE001
+        return ""
+    if d["single_dcf_ok"]:
+        return ""
+    split = None
+    try:
+        split = business_mix.split_finance_debt(company, year, "annual", prefer)
+    except Exception:  # noqa: BLE001
+        pass
+    msg = (f" ⚠️ [금융부문 오염] {d['reason']} 이 순부채는 **연결 기준**이라 금융부문 조달이 "
+           f"포함돼 있고, 제조부문 EV 에서 그대로 차감하면 과다차감이 됩니다.")
+    if split and split["confident"]:
+        msg += (f" 계정명 기준 분해: 금융 {split['finance']:,} / 제조 "
+                f"{split['industrial']:,} (근거 {'; '.join(split['finance_rows'][:3])}).")
+    elif split:
+        msg += f" 차입금 분해 불가 — {split['basis']}. 세그먼트 재무가 필요합니다."
+    return msg
 
 
 def _net_debt_from_audit(company: str, year: int | None, include_lease: bool) -> Value:
@@ -117,12 +146,23 @@ def _series_map(payload: dict, key: str = "series") -> dict[int, int | None]:
     return {p["year"]: p["amount"] for p in payload[key]}
 
 
+# ΔNWC/Δ매출 안전장치 상수
+NWC_MIN_REV_CHANGE = 0.02   # |Δ매출|/매출 이 2% 미만인 연도는 비율 계산에서 제외
+NWC_SANITY_LIMIT = 30.0     # |ΔNWC/Δ매출| 이 30% 를 넘으면 자동 채택 금지
+
+
 def historical_ratios(company: str, n: int = 5, year: int | None = None,
-                      report: str = "annual", prefer: str = "CFS") -> dict:
+                      report: str = "annual", prefer: str = "CFS",
+                      narrow_nwc: bool | None = None) -> dict:
     """최근 n개년 실적에서 DCF 가정의 출발점이 되는 비율들을 계산한다.
 
     돌려주는 dict 의 각 값은 Value(단위 %) 또는 None(데이터 없음).
     각 Value 의 extras 에 연도별 값이 들어가므로 사용자가 눈으로 검증할 수 있다.
+
+    narrow_nwc: 운전자본을 **좁은 정의**(매출채권+재고-매입채무)로 강제한다.
+      None(기본)이면 engines.business_mix 로 판정해 금융부문이 섞인 회사에 자동 적용한다.
+      현금흐름표의 '자산부채의 변동' 집계에는 금융업채권·할부금융자산 증감이 함께 들어 있어
+      캡티브 금융 보유사에서 ΔNWC 가 폭발한다(현대자동차 실측 161.51%).
     """
     rev = dart.financial_item_nyear(company, "revenue", n, year, report, prefer)
     ebit = dart.financial_item_nyear(company, "operating_income", n, year, report, prefer)
@@ -205,22 +245,46 @@ def historical_ratios(company: str, n: int = 5, year: int | None = None,
     da_pct = _ratio_of_revenue(das, "D&A/매출(5개년 평균)",
                                "감가상각비+무형자산상각비", da_note_extra)
 
-    # ΔNWC / Δ매출 — 부호 반전 필요(CF 는 현금영향)
-    nwc_pct = None
-    nwc_pairs = []
-    for i in range(1, len(asc)):
-        y, prev = asc[i], asc[i - 1]
-        if nwcs.get(y) is None or not revs.get(y) or not revs.get(prev):
-            continue
-        d_rev = revs[y] - revs[prev]
-        if d_rev == 0:
-            continue
-        nwc_pairs.append((y, (-nwcs[y]) / d_rev))
-    nwc_basis = ("현금흐름표 '영업활동으로 인한 자산부채의 변동'은 현금영향이라 부호를 반전해 "
-                 "ΔNWC 로 환산")
+    # ── ΔNWC / Δ매출 ──────────────────────────────────────────────
+    # 안전장치 3겹: (1) 좁은 정의 강제(금융부문 보유사) (2) Δ매출 분모 하한 (3) 상한 게이트.
+    # 실측 실패(현대자동차): 현금흐름표 '자산부채의 변동' 집계에 금융업채권 증감이 포함돼
+    # ΔNWC/Δ매출 161.51% -> 5개년 UFCF 전부 음수 -> 주당 -5,042,055원.
+    if narrow_nwc is None:
+        try:
+            from engines import business_mix
 
-    # 폴백: 현금흐름표에 '자산부채의 변동' 합계가 없는 회사(SK하이닉스·네이버 실측)는
-    # 재무상태표에서 NWC = 매출채권 + 재고자산 − 매입채무 를 만들어 연도별 증감으로 계산한다.
+            narrow_nwc = not business_mix.classify(company, year, prefer,
+                                                   deep=False)["single_dcf_ok"]
+        except Exception:  # noqa: BLE001 — 판정 실패는 계산을 막지 않는다(기존 경로 유지)
+            narrow_nwc = False
+
+    def _too_small(y: int, prev: int) -> bool:
+        """Δ매출이 매출 대비 너무 작은 연도는 비율이 폭발한다 -> 제외."""
+        return abs(revs[y] - revs[prev]) < abs(revs[y]) * NWC_MIN_REV_CHANGE
+
+    nwc_pct = None
+    nwc_pairs: list[tuple[int, float]] = []
+    nwc_skipped: list[str] = []
+    nwc_basis = ""
+
+    if not narrow_nwc:
+        for i in range(1, len(asc)):
+            y, prev = asc[i], asc[i - 1]
+            if nwcs.get(y) is None or not revs.get(y) or not revs.get(prev):
+                continue
+            d_rev = revs[y] - revs[prev]
+            if d_rev == 0:
+                continue
+            if _too_small(y, prev):
+                nwc_skipped.append(f"{y}(Δ매출 {d_rev / revs[y] * 100:+.1f}%)")
+                continue
+            nwc_pairs.append((y, (-nwcs[y]) / d_rev))
+        if nwc_pairs:
+            nwc_basis = ("현금흐름표 '영업활동으로 인한 자산부채의 변동'은 현금영향이라 부호를 "
+                         "반전해 ΔNWC 로 환산")
+
+    # 좁은 정의 경로 — 금융부문 보유사에는 **강제**, 그 외에는 CF 에 집계가 없을 때 폴백.
+    # (SK하이닉스·네이버 실측: CF 에 '자산부채의 변동' 합계 행이 없다)
     if not nwc_pairs:
         wc: dict[int, int] = {}
         try:
@@ -243,18 +307,34 @@ def historical_ratios(company: str, n: int = 5, year: int | None = None,
             d_rev = revs[y] - revs[prev]
             if d_rev == 0:
                 continue
+            if _too_small(y, prev):
+                nwc_skipped.append(f"{y}(Δ매출 {d_rev / revs[y] * 100:+.1f}%)")
+                continue
             nwc_pairs.append((y, (wc[y] - wc[prev]) / d_rev))
         if nwc_pairs:
-            nwc_basis = ("현금흐름표에 자산부채 변동 합계가 없어 재무상태표에서 "
-                         "NWC = 매출채권 + 재고자산 − 매입채무 의 연도별 증감으로 산출")
+            nwc_basis = ("영업 운전자본 = 매출채권 + 재고자산 - 매입채무 의 연도별 증감"
+                         + (" (금융부문 보유사 -> 금융성 자산·부채를 배제한 좁은 정의를 강제)"
+                            if narrow_nwc else
+                            " (현금흐름표에 자산부채 변동 합계가 없어 재무상태표에서 산출)"))
 
+    nwc_flag = None
     if nwc_pairs:
+        # 산술평균은 이상치 하나에 무방비다(3개년이면 특히) -> median.
+        med = median([r for _, r in nwc_pairs]) * 100
+        if abs(med) > NWC_SANITY_LIMIT:
+            nwc_flag = (f"|ΔNWC/Δ매출| {abs(med):.1f}% 가 통상 범위"
+                        f"({NWC_SANITY_LIMIT:.0f}%)를 넘습니다 — 자동 채택하지 말고 "
+                        f"사용자에게 확인하세요.")
         nwc_pct = _computed(
-            round(mean(r for _, r in nwc_pairs) * 100, 2), "%",
-            f"{name} ΔNWC/Δ매출({len(nwc_pairs)}개년 평균)",
-            f"{len(nwc_pairs)}개년 산술평균. {nwc_basis}. 연도별: "
-            + ", ".join(f"{y} {r * 100:+.1f}%" for y, r in nwc_pairs)
-            + ". 매출 감소 연도가 섞이면 부호가 뒤집혀 평균이 왜곡될 수 있으니 확인 필요.", as_of)
+            round(med, 2), "%",
+            f"{name} ΔNWC/Δ매출({len(nwc_pairs)}개년 중앙값)",
+            f"{len(nwc_pairs)}개년 중앙값(산술평균은 이상치에 취약해 median 사용). {nwc_basis}. "
+            f"연도별: " + ", ".join(f"{y} {r * 100:+.1f}%" for y, r in nwc_pairs)
+            + (f". 제외된 연도: {', '.join(nwc_skipped)} — Δ매출이 매출의 "
+               f"{NWC_MIN_REV_CHANGE * 100:.0f}% 미만이면 비율이 폭발해 제외"
+               if nwc_skipped else "")
+            + ". 매출 감소 연도가 섞이면 부호가 뒤집힐 수 있으니 연도별 값을 확인할 것."
+            + (f" ⚠️ {nwc_flag}" if nwc_flag else ""), as_of)
 
     missing = [k for k, v in (("ebit_margin_pct", ebit_margin), ("revenue_growth_pct", growth),
                               ("da_pct", da_pct), ("capex_pct", capex_pct),
@@ -264,6 +344,8 @@ def historical_ratios(company: str, n: int = 5, year: int | None = None,
         "ebit_margin_pct": ebit_margin, "revenue_growth_pct": growth,
         "da_pct": da_pct, "capex_pct": capex_pct, "nwc_pct": nwc_pct,
         "missing": missing,
+        "nwc_narrow": bool(narrow_nwc), "nwc_basis": nwc_basis,
+        "nwc_skipped_years": nwc_skipped, "nwc_needs_confirmation": nwc_flag,
     }
 
 
@@ -299,11 +381,91 @@ def cost_of_debt(company: str, year: int | None = None, include_lease: bool = Tr
     f = lambda x: f"{x:,.0f}"  # noqa: E731
     note = (f"이자비용 {f(interest.value)} ÷ IBD {f(ibd)} = {kd:.2f}%. "
             f"{interest.provenance.original_field}. 기말 잔액 기준(기중 평균 아님) — "
-            f"차입금이 급변한 해는 왜곡 가능.")
+            f"차입금이 급변한 해는 왜곡 가능. "
+            f"⚠️ 이것은 **실효(과거 가중평균) 조달금리**이고 신규 조달비용이 아니다 — "
+            f"WACC 에는 market_cost_of_debt(등급별 회사채 유통수익률)를 쓰고, 이 값은 "
+            f"교차검증에 쓴다.")
     if kd > 15 or kd < 0.3:
         note += f" ⚠️ {kd:.2f}% 는 통상 범위(0.3~15%)를 벗어남 — 검토 필요."
     return _computed(round(kd, 2), "%", f"{interest.label.split(' 이자')[0]} 세전 타인자본비용(Kd)",
                      note, interest.provenance.as_of, extras={"interest_expense": interest})
+
+
+# 이자보상배율 → 한국은행 고시 등급 구간. 고시가 AA-/BBB- 두 구간뿐이라 두 갈래로만
+# 나눈다(없는 정밀도를 만들지 않는다). 경계 5배는 실무에서 투자적격/취약 구분에 널리 쓰는 값.
+COVERAGE_INVESTMENT_GRADE = 5.0
+
+
+def market_cost_of_debt(company: str, year: int | None = None, country: str = "KR",
+                        rating: str | None = None, report: str = "annual",
+                        prefer: str = "CFS") -> Value:
+    """**시장** 세전 Kd = 해당 등급 회사채 유통수익률 (신규 조달금리).
+
+    실효 Kd(cost_of_debt: 이자비용÷차입금)는 과거 조달금리의 가중평균이라 WACC 의 신규
+    조달비용으로는 맞지 않다. 실측(SK하이닉스): 실효 Kd 3.79% < 무위험수익률 4.288% 라는
+    역전이 나왔고, 이는 계산 오류가 아니라 "만기가 남은 저금리 조달분이 살아있다" 는 사실의
+    정확한 반영이다 — 그러나 그 값을 신규 조달비용으로 쓰면 신용스프레드가 음수가 된다.
+
+    등급은 rating 으로 직접 지정하거나, 미지정 시 이자보상배율(EBIT ÷ 이자비용)로 구간을
+    고른다. 실효 Kd 와의 괴리는 note 에 남긴다.
+    """
+    c = (country or "KR").strip().upper()
+    if c != "KR":
+        raise DataError(
+            f"시장 Kd 는 현재 한국(ECOS 등급별 회사채)만 지원합니다 — {c} 는 "
+            f"get_industry_benchmarks 의 산업평균 Kd 를 쓰거나 값을 직접 지정하세요.")
+
+    coverage = None
+    cov_note = ""
+    if rating is None:
+        try:
+            ebit = dart.financial_item(company, "operating_income", year, report, prefer)
+            cf = dart.cf_extras(company, year, report, prefer)
+            interest = cf.get("interest")
+            if interest is not None and interest.value:
+                coverage = ebit.value / interest.value
+        except DataError:
+            coverage = None
+        if coverage is None:
+            rating = "AA-"
+            cov_note = ("이자보상배율을 계산할 수 없어 AA- 구간을 가정했습니다 — 등급을 알면 "
+                        "rating 으로 지정하세요. ")
+        else:
+            rating = "AA-" if coverage >= COVERAGE_INVESTMENT_GRADE else "BBB-"
+            cov_note = (f"이자보상배율(EBIT÷이자비용) {coverage:.1f}배 → "
+                        f"{'AA-' if coverage >= COVERAGE_INVESTMENT_GRADE else 'BBB-'} 구간"
+                        f"(경계 {COVERAGE_INVESTMENT_GRADE:.0f}배). ")
+
+    y = ecos.corporate_bond_yield(rating)
+    rf = ecos.risk_free_rate("3Y")
+    spread = y.value - rf.value
+
+    effective = None
+    eff_note = ""
+    try:
+        effective = cost_of_debt(company, year, True, report, prefer)
+    except DataError:
+        pass
+    if effective is not None:
+        gap = effective.value - y.value
+        eff_note = (f"실효 Kd(이자비용÷차입금) {effective.value}% 와의 차이 {gap:+.2f}%p. ")
+        if effective.value < rf.value:
+            eff_note += (f"⚠️ 실효 Kd 가 무위험수익률({rf.value}%)보다 낮습니다 — 과거 저금리 "
+                         f"조달분 때문이며 신용스프레드가 음수라는 뜻이 아닙니다. WACC 에는 "
+                         f"이 시장 Kd 를 쓰는 것이 맞습니다. ")
+        elif abs(gap) > 2.0:
+            eff_note += ("⚠️ 두 값의 괴리가 2%p 를 넘습니다 — 조달구조가 최근 크게 바뀌었을 "
+                         "수 있으니 어느 쪽을 쓸지 명시적으로 판단하세요. ")
+
+    return _computed(
+        round(y.value, 2), "%", f"{company} 세전 타인자본비용(Kd, 시장 · {rating})",
+        f"{y.label} {y.value}% (한국은행 ECOS, {y.provenance.as_of}) = 신규 조달금리. "
+        f"{cov_note}국고채 3년 {rf.value}% 대비 신용스프레드 {spread:+.2f}%p. {eff_note}"
+        f"한국은행 고시 등급이 AA-/BBB- 두 구간뿐이라 그 사이 등급은 근사입니다.",
+        y.provenance.as_of,
+        extras={k: v for k, v in {
+            "corporate_bond_yield": y, "risk_free_rate": rf,
+            "effective_cost_of_debt": effective}.items() if v is not None})
 
 
 def _cost_of_debt_from_audit(company: str, year: int | None, include_lease: bool) -> Value:
@@ -331,18 +493,39 @@ def _cost_of_debt_from_audit(company: str, year: int | None, include_lease: bool
 
 
 # ── 영구성장률 ────────────────────────────────────────────────────
-def terminal_growth(country: str = "KR", tenor: str = "10Y") -> Value:
-    """영구성장률 g. Damodaran 원칙: **g 는 무위험수익률을 넘을 수 없다**
-    (영구히 경제보다 빨리 크는 기업은 없다 → 국채수익률이 명목 경제성장률의 상한 대용).
-    그래서 g = 해당 국가 10년 국채수익률로 잡고, 원본 Rf 를 extras 로 함께 돌려준다.
-    더 보수적으로 가려면 이 값보다 낮게 직접 지정하면 된다."""
+# 영구성장률의 실무 권장 범위. 국채수익률은 g 의 **상한**이지 g 자체가 아니다 —
+# 이름이 terminal_growth 였던 탓에 LLM 이 상한값을 g 로 그대로 써서 TV 가 폭발했다
+# (실측: 국고채 4.288% 를 g 로 사용 → WACC−g 스프레드 0.2%p, TV 비중 92%).
+TERMINAL_G_SUGGESTED = {"KR": 2.0, "US": 2.5, "JP": 1.0, "TW": 2.0}
+
+
+def terminal_growth_cap(country: str = "KR", tenor: str = "10Y") -> Value:
+    """영구성장률 g 의 **상한**과 권장 기본값을 함께 돌려준다.
+
+    Damodaran 원칙: g ≤ 무위험수익률(영구히 경제보다 빨리 크는 기업은 없고, 국채수익률이
+    명목 경제성장률의 상한 대용). 그러나 **상한을 g 로 그대로 쓰면 안 된다** — value 에는
+    권장 g(장기 인플레이션 + 실질성장 수준)를 담고, 상한은 extras.cap 으로 준다.
+    """
     c = (country or "KR").strip().upper()
-    rf = ecos.risk_free_rate(tenor) if c == "KR" else fred.risk_free_rate(tenor)
     if c not in ("KR", "US"):
         raise DataError(f"영구성장률 산정 미지원 국가: {country} (현재 KR, US)")
+    rf = ecos.risk_free_rate(tenor) if c == "KR" else fred.risk_free_rate(tenor)
+    cap = rf.value
+    suggested = min(TERMINAL_G_SUGGESTED.get(c, 2.0), cap)
+    cap_v = _computed(
+        cap, "%", f"영구성장률 g 상한 ({c})",
+        f"Damodaran 원칙(g ≤ 무위험수익률): {c} 국채 {tenor} {cap}% "
+        f"({rf.provenance.source}, {rf.provenance.as_of})", rf.provenance.as_of,
+        extras={"risk_free_rate": rf})
     return _computed(
-        rf.value, "%", f"영구성장률 g ({c})",
-        f"Damodaran 원칙(g ≤ 무위험수익률)에 따라 {c} 국채 {tenor} 수익률 {rf.value}% 를 g 의 "
-        f"상한으로 채택 ({rf.provenance.source}, {rf.provenance.as_of}). 영구히 명목 경제성장률을 "
-        f"초과하는 성장은 불가능하다는 전제. 더 보수적으로 보려면 이보다 낮게 지정.",
-        rf.provenance.as_of, extras={"risk_free_rate": rf})
+        suggested, "%", f"영구성장률 g 권장값 ({c})",
+        f"권장 g {suggested}% = 장기 물가+실질성장 수준. 상한은 국채 {tenor} {cap}% 이지만 "
+        f"**상한을 g 로 쓰면 안 된다** — WACC−g 스프레드가 좁아져 TV 가 EV 를 지배하고, "
+        f"국채수익률 수준의 영구성장은 그 자체로 정당화되지 않는다. 상한 근처를 쓰려면 "
+        f"근거를 별도로 제시할 것.", rf.provenance.as_of,
+        extras={"cap": cap_v, "risk_free_rate": rf})
+
+
+# 예전 이름 호환 — 상한이 아니라 권장값을 돌려주도록 의미가 바뀌었다.
+def terminal_growth(country: str = "KR", tenor: str = "10Y") -> Value:
+    return terminal_growth_cap(country, tenor)

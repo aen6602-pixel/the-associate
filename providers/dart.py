@@ -13,7 +13,7 @@ import re
 import difflib
 import zipfile
 import xml.etree.ElementTree as ET
-from functools import lru_cache
+from core.cache import TTL_FRESH, TTL_INDEX, ttl_cache
 from datetime import date
 
 from core.schema import Provenance, Value, DataError, SourceType
@@ -23,7 +23,14 @@ from core import config
 _BASE = "https://opendart.fss.or.kr/api"
 
 # 사업보고서 유형
-REPRT = {"annual": "11011", "half": "11012", "q1": "13013", "q3": "11014"}
+# ⚠️ q1 은 11013 이다. 예전에 13013 으로 잘못 적혀 있었는데, DART 는 알 수 없는 reprt_code 를
+# 오류로 돌려주지 않고 **사업보고서(연간)를 그대로 반환**해서 조용히 틀렸다(실측 2026-08-27,
+# 삼성전자 2025: 13013 → thstrm_nm='제 57 기' 영업이익 43.6조=연간, 11013 → '제 57 기 1분기'
+# 6.69조). report='q1' 로 조회한 모든 값이 연간값이었다는 뜻이다.
+REPRT = {"annual": "11011", "half": "11012", "q1": "11013", "q3": "11014"}
+
+# 누적기간 조회 순서(최근 분기 우선) — LTM 계산에서 "가장 늦은 분기 누적" 을 찾는 데 쓴다.
+_QUARTER_ORDER = (("q3", "11014", 9), ("half", "11012", 6), ("q1", "11013", 3))
 
 # item 키 → (sj_div, [account_id 후보], [account_nm 후보])
 ITEM_MAP: dict[str, tuple] = {
@@ -120,6 +127,40 @@ _PREFIX_ALIAS = {
 }
 
 
+# ── 입력 식별자 전처리 ────────────────────────────────────────────
+# 실측 실패(2026-08): `현대자동차(005380)` 이라는 지극히 평범한 입력이 못 찾음으로 떨어졌다.
+# 원인은 _norm_name 이 **괄호 기호만 지우고 안의 숫자는 남겨서** "현대자동차005380" 이라는
+# 토큰이 만들어진 것이다. 그러면
+#   · 부분일치 방향1(등록명 ⊂ 입력)의 길이 게이트 len(norm) >= int(len(qn)*0.6)=9 에 걸리고
+#     (len("현대자동차")=5 < 9)
+#   · fuzzy cutoff 0.78 도 유사도 0.5 로 미달
+# 두 게이트에 동시에 막혔다. 괄호 안 내용을 **통째로 분리**하면 둘 다 통과한다.
+_PAREN_RE = re.compile(r"[（(\[]\s*([^）)\]]*?)\s*[）)\]]")
+_TICKER_SUFFIX_RE = re.compile(r"\.(ks|kq|kospi|kosdaq)\s*$", re.I)
+_SIX_DIGITS_RE = re.compile(r"^\d{6}$")
+
+
+def parse_identifier(company: str) -> tuple[str, str | None]:
+    """'현대자동차(005380)' → ('현대자동차', '005380'), '005380.KS' → ('', '005380').
+
+    돌려주는 종목코드는 **가장 강한 신호**라서 resolve() 가 이름보다 먼저 쓴다.
+    괄호 안이 종목코드가 아니어도(예: '삼성전자(반도체)') 이름에서 떼어내는 것이 맞다 —
+    등록명에는 없는 수식어이기 때문이다.
+    """
+    q = (company or "").strip()
+    code = None
+    for m in _PAREN_RE.finditer(q):
+        inner = (m.group(1) or "").strip()
+        inner_digits = _TICKER_SUFFIX_RE.sub("", inner).strip()
+        if _SIX_DIGITS_RE.match(inner_digits):
+            code = inner_digits
+    q = _PAREN_RE.sub(" ", q).strip()
+    q = _TICKER_SUFFIX_RE.sub("", q).strip()
+    if _SIX_DIGITS_RE.match(q):
+        code, q = q, ""
+    return q, code
+
+
 def _norm_name(s: str) -> str:
     """비교용 정규화: 소문자, 법인격/공백/기호 제거, 한글약칭→영문."""
     s = str(s).lower().strip()
@@ -130,7 +171,7 @@ def _norm_name(s: str) -> str:
     return s
 
 
-@lru_cache(maxsize=1)
+@ttl_cache(TTL_INDEX, maxsize=1)
 def _corp_index() -> tuple[dict, dict, dict]:
     """corpCode.xml → (name→[entry], stock_code→entry, norm_name→[entry])."""
     key = config.require(config.Keys.DART, "DART_API_KEY")
@@ -144,12 +185,18 @@ def _corp_index() -> tuple[dict, dict, dict]:
         entry = {
             "corp_code": (e.findtext("corp_code") or "").strip(),
             "corp_name": (e.findtext("corp_name") or "").strip(),
+            "corp_eng_name": (e.findtext("corp_eng_name") or "").strip(),
             "stock_code": (e.findtext("stock_code") or "").strip(),
         }
         by_name.setdefault(entry["corp_name"], []).append(entry)
         if entry["stock_code"]:
             by_stock[entry["stock_code"]] = entry
         by_norm.setdefault(_norm_name(entry["corp_name"]), []).append(entry)
+        # corpCode.xml 에는 영문 등록명도 있다 — "Hyundai Motor" 처럼 영문으로 물어오는 입력을
+        # 예전에는 전혀 못 받았다(한글 색인만 만들어서). 같은 정규화 함수를 태워 같이 넣는다.
+        eng_norm = _norm_name(entry["corp_eng_name"])
+        if eng_norm and eng_norm != _norm_name(entry["corp_name"]):
+            by_norm.setdefault(eng_norm, []).append(entry)
     return by_name, by_stock, by_norm
 
 
@@ -166,13 +213,24 @@ def suggest(company: str, n: int = 6) -> list[str]:
 
 
 def resolve(company: str) -> dict:
-    """회사명(대충 입력 허용) 또는 6자리 종목코드 → {corp_code, corp_name, stock_code}."""
-    q = company.strip()
+    """회사명(대충 입력 허용) 또는 6자리 종목코드 → {corp_code, corp_name, stock_code}.
+
+    허용 입력(전부 동일 법인으로 해석): '현대자동차', '현대차', '005380', '005380.KS',
+    '현대자동차(005380)', 'Hyundai Motor'.
+    """
+    raw = (company or "").strip()
     by_name, by_stock, by_norm = _corp_index()
-    if q.isdigit() and len(q) == 6:                       # 종목코드
-        if q in by_stock:
-            return by_stock[q]
-        raise DataError(f"종목코드 {q} 를 DART 에서 못 찾음")
+    if raw in by_name:                    # 원문이 등록명과 정확히 같으면 전처리 없이 채택
+        return _best(by_name[raw])
+    q, code = parse_identifier(raw)
+    if code:                              # 종목코드가 가장 강한 신호 → 이름보다 먼저
+        if code in by_stock:
+            return by_stock[code]
+        if not q:
+            raise DataError(f"종목코드 {code} 를 DART 에서 못 찾음")
+        # 코드가 안 맞아도 이름이 남아 있으면 이름으로 계속 시도한다(오타 가능성).
+    if not q:
+        raise DataError(f"조회할 회사명이나 종목코드를 찾지 못했습니다: {company!r}")
     if q in by_name:                                      # 원문 정확 일치
         return _best(by_name[q])
     qn = _norm_name(q)
@@ -203,10 +261,13 @@ def resolve(company: str) -> dict:
 # ── 재무제표 ─────────────────────────────────────────────────────
 def _fetch_all(corp_code: str, year: int, reprt_code: str, fs_div: str) -> tuple[list, str]:
     key = config.require(config.Keys.DART, "DART_API_KEY")
-    j = get_json(f"{_BASE}/fnlttSinglAcntAll.json", ttl_hours=24 * 3, params={
+    # ⚠️ 빈 응답(status != 000)은 1시간만 캐시한다 — 아직 접수 안 된 사업연도를 물으면
+    # DART 가 013 을 주는데, 그것을 길게 캐시하면 보고서가 올라온 뒤에도 '최신 연도' 판정이
+    # 그만큼 늦어진다(리노공업 FY2025 는 2026-03-18 접수).
+    j = get_json(f"{_BASE}/fnlttSinglAcntAll.json", ttl_hours=24, params={
         "crtfc_key": key, "corp_code": corp_code, "bsns_year": str(year),
         "reprt_code": reprt_code, "fs_div": fs_div,
-    })
+    }, is_empty=lambda d: d.get("status") != "000")
     if j.get("status") != "000":
         raise DataError(f"DART 재무제표 오류: {j.get('status')} {j.get('message')}")
     return j.get("list", []), fs_div
@@ -256,7 +317,10 @@ def _filing_date(rcept: str) -> str | None:
     return f"{rcept[:4]}-{rcept[4:6]}-{rcept[6:8]}" if len(rcept or "") >= 8 else None
 
 
-@lru_cache(maxsize=512)
+# ⚠️ **여기에 TTL 이 없으면 새 사업보고서를 영원히 못 본다.** lru_cache 는 프로세스가
+# 사는 동안 만료되지 않아서, 배포 서버가 3월 이전에 '최신=2024' 를 한 번 계산해두면
+# 재시작 전까지 계속 2024 를 돌려준다(리노공업 FY2022~2024 사고의 직접 원인).
+@ttl_cache(TTL_FRESH, maxsize=512)
 def _latest_year(corp_code: str, reprt_code: str, prefer: str = "CFS") -> int:
     """실제로 데이터가 존재하는 가장 최근 사업연도를 탐색한다.
     'date.today().year - 1' 로 무작정 찍으면 아직 그 연도 보고서가 없거나(신규상장 등)
@@ -333,6 +397,154 @@ def financial_item(company: str, item: str, year: int | None = None,
         except DataError:
             raise e                                   # 원래 에러(013 등) 유지
         return _audit_value(ent, item, ay, amt, rcept)
+
+
+def _cum_amount(row: dict) -> int | None:
+    """분기보고서 행의 **누적(YTD) 금액**. thstrm_add_amount 가 누적, thstrm_amount 는
+    당분기 3개월 단독이다(실측 2026-08-27, 삼성전자 제57기 3분기 영업이익:
+    thstrm=12.17조(3개월) / add=23.53조(9개월 누적)). 1분기는 둘이 같다."""
+    return _to_int(row.get("thstrm_add_amount")) or _to_int(row.get("thstrm_amount"))
+
+
+def _latest_quarter(corp_code: str, year: int, prefer: str) -> tuple[str, str, int] | None:
+    """해당 사업연도에 존재하는 가장 늦은 분기보고서 → (report, reprt_code, 누적개월)."""
+    for report, reprt_code, months in _QUARTER_ORDER:
+        try:
+            rows, _ = _statement_rows(corp_code, year, reprt_code, prefer)
+        except DataError:
+            continue
+        if rows:
+            return report, reprt_code, months
+    return None
+
+
+def ltm_item(company: str, item: str, prefer: str = "CFS") -> Value:
+    """LTM(최근 12개월) 손익 항목.
+
+    LTM = 직전 연간 + 당해 누적(최신 분기) − 전년 동기 누적.
+    분기보고서가 아직 없으면 연간값을 그대로 쓰고 그 사실을 label·note 에 남긴다
+    (조용히 연간을 LTM 이라고 부르지 않는다).
+    """
+    if item not in ITEM_MAP:
+        raise DataError(f"지원하지 않는 항목: {item}. 지원: {list(ITEM_MAP)}")
+    sj = ITEM_MAP[item][0]
+    if not (isinstance(sj, tuple) and "IS" in sj):
+        raise DataError(f"'{ITEM_LABEL[item]}' 은 시점(stock) 항목이라 LTM 개념이 없습니다 "
+                        f"— 최신 시점값(financial_item)을 쓰세요.")
+    ent = resolve(company)
+    cc = ent["corp_code"]
+    fy = _latest_year(cc, REPRT["annual"], prefer)
+    annual = financial_item(company, item, fy, "annual", prefer)
+
+    q = _latest_quarter(cc, fy + 1, prefer)
+    if q is None:
+        return Value(
+            annual.value, annual.unit,
+            label=f"{ent['corp_name']} {ITEM_LABEL[item]} (FY{fy} 연간 — LTM 아님)",
+            provenance=Provenance(
+                source=annual.provenance.source, source_type=annual.provenance.source_type,
+                source_url=annual.provenance.source_url,
+                original_field=annual.provenance.original_field, as_of=f"FY{fy}",
+                filing_date=annual.provenance.filing_date,
+                note=(f"FY{fy+1} 분기보고서가 아직 없어 LTM 을 만들 수 없습니다 → FY{fy} 연간값. "
+                      f"기준기간이 LTM 이 아니라 연간이라는 점을 비교표에 표시해야 합니다."),
+            ),
+        )
+
+    report, reprt_code, months = q
+    cur_rows, fs_label = _statement_rows(cc, fy + 1, reprt_code, prefer)
+    cur_row = _match(cur_rows, item)
+    prev_rows, _ = _statement_rows(cc, fy, reprt_code, prefer)
+    prev_row = _match(prev_rows, item)
+    cur = _cum_amount(cur_row) if cur_row else None
+    prev = _cum_amount(prev_row) if prev_row else None
+    if cur is None or prev is None:
+        raise DataError(
+            f"{ent['corp_name']} LTM 계산 실패: {fy+1}년 {report} 누적"
+            f"{'(없음)' if cur is None else f'={cur:,}'} / {fy}년 동기 누적"
+            f"{'(없음)' if prev is None else f'={prev:,}'} — 분기 비교가 성립하지 않습니다.")
+
+    ltm = annual.value + cur - prev
+    rcept = (cur_row or {}).get("rcept_no", "")
+    f = lambda x: f"{x:,.0f}"  # noqa: E731
+    return Value(
+        ltm, annual.unit,
+        label=f"{ent['corp_name']} {ITEM_LABEL[item]} (LTM, {fy+1} {report} 기준)",
+        provenance=Provenance(
+            source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
+            source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
+            original_field=f"연간 + {months}개월 누적 − 전년 동기 누적",
+            as_of=f"LTM~{fy+1} {report}", filing_date=_filing_date(rcept),
+            note=(f"LTM = FY{fy} 연간 {f(annual.value)} + FY{fy+1} {months}개월 누적 "
+                  f"{f(cur)} − FY{fy} {months}개월 누적 {f(prev)} = {f(ltm)}. {fs_label}."),
+        ),
+        extras={"annual": annual},
+    )
+
+
+def ltm_da(company: str, prefer: str = "CFS") -> Value:
+    """LTM D&A. 현금흐름표에 D&A 가 분리 공시되면 LTM 으로, 아니면 **연간값으로 폴백**하고
+    그 사실을 note 에 남긴다.
+
+    실측 2026-08-27: 삼성전자는 연결 CF 에 감가상각 계정이 따로 없고('조정' 한 줄에 뭉쳐 있음)
+    성격별 분류 주석에서만 D&A 가 나온다 → 분기 주석까지 파싱하지는 않으므로 연간 D&A 를
+    쓰게 된다. 이때 EBITDA 의 분모 기간이 EBIT(LTM)과 어긋나므로 반드시 표에 표시해야 한다.
+    """
+    ent = resolve(company)
+    cc = ent["corp_code"]
+    fy = _latest_year(cc, REPRT["annual"], prefer)
+    annual = da_best(company, fy, "annual", prefer)
+
+    q = _latest_quarter(cc, fy + 1, prefer)
+    if q is not None:
+        report, reprt_code, months = q
+        try:
+            cur = _cf_da_cumulative(cc, fy + 1, reprt_code, prefer)
+            prev = _cf_da_cumulative(cc, fy, reprt_code, prefer)
+        except DataError:
+            cur = prev = None
+        if cur is not None and prev is not None:
+            ltm = annual.value + cur - prev
+            f = lambda x: f"{x:,.0f}"  # noqa: E731
+            return Value(
+                ltm, "KRW", label=f"{ent['corp_name']} D&A (LTM, {fy+1} {report} 기준)",
+                provenance=Provenance(
+                    source="DART (금융감독원) 현금흐름표", source_type=SourceType.AUTHORITATIVE,
+                    source_url=annual.provenance.source_url,
+                    original_field="CF 감가상각·무형상각 누적", as_of=f"LTM~{fy+1} {report}",
+                    note=(f"LTM D&A = FY{fy} {f(annual.value)} + FY{fy+1} {months}개월 "
+                          f"{f(cur)} − FY{fy} {months}개월 {f(prev)} = {f(ltm)}"),
+                ),
+                extras={"annual": annual},
+            )
+    return Value(
+        annual.value, "KRW",
+        label=f"{ent['corp_name']} D&A (FY{fy} 연간 — LTM 아님)",
+        provenance=Provenance(
+            source=annual.provenance.source, source_type=annual.provenance.source_type,
+            source_url=annual.provenance.source_url,
+            original_field=annual.provenance.original_field, as_of=f"FY{fy}",
+            note=("분기 D&A 를 공시에서 분리할 수 없어 연간값을 사용했습니다 "
+                  "→ EBIT(LTM)과 기간이 어긋나므로 EBITDA 기준을 표에 명시해야 합니다. "
+                  f"원 note: {annual.provenance.note}"),
+        ),
+    )
+
+
+def _cf_da_cumulative(corp_code: str, year: int, reprt_code: str, prefer: str) -> int | None:
+    """분기보고서 CF 의 D&A 누적금액. 분리 공시가 없으면 None."""
+    rows, _ = _statement_rows(corp_code, year, reprt_code, prefer)
+    cf_rows = [r for r in rows if r.get("sj_div") == "CF"]
+    da = _da_rows(cf_rows)
+    if not da:
+        return None
+    total = 0
+    for r in da:
+        amt = _cum_amount(r)
+        if amt is None:
+            return None
+        total += amt
+    return total
 
 
 def sga_item(company: str, year: int | None = None, report: str = "annual",
@@ -461,7 +673,8 @@ def financial_item_nyear(company: str, item: str, n: int = 5, year: int | None =
     if missing and n > 3:
         _collect(min(missing) + 2)  # 그 연도가 frmtrm/bfefrmtrm 으로 나오는 보고서 앵커
 
-    series = [{"year": y, "amount": amounts.get(y)} for y in years_needed]
+    series = [{"year": y, "period": f"FY{y}", "amount": amounts.get(y)}
+              for y in years_needed]
     return {"corp_name": ent["corp_name"], "stock_code": ent["stock_code"],
             "corp_code": ent["corp_code"], "item": item, "rcept": rcept,
             "filing_date": _filing_date(rcept) if rcept else None, "series": series}
@@ -852,9 +1065,17 @@ def da_best(company: str, year: int | None = None, report: str = "annual",
     return da_from_notes(company, year, report, prefer)
 
 
-def shares_outstanding(company: str, year: int | None = None, report: str = "annual") -> Value:
-    """발행주식총수(합계, 현재까지 발행한 주식의 총수). 단위 '주'.
-    note 에 보통주/우선주/자기주식 내역 표기."""
+def shares_outstanding(company: str, year: int | None = None, report: str = "annual",
+                       basis: str = "issued") -> Value:
+    """주식수. 단위 '주'.
+
+    basis="issued"(기본)   → 발행주식총수 = 유통주식수 + 자기주식수 (상증법 분모)
+    basis="outstanding"    → 유통주식수 (주당가치 계산에 쓰는 쪽)
+
+    ⚠️ **시가총액 계산에는 이 함수를 쓰지 마라.** 시가총액은 거래소가 보통주 기준으로 이미
+    계산해 주므로 providers.naver.implied_common_shares(=KRX 시총 ÷ 종가)를 쓴다. 여기서
+    나오는 수치는 보통주+우선주 합계라서 보통주 종가와 곱하면 시가총액이 과대계상된다.
+    """
     key = config.require(config.Keys.DART, "DART_API_KEY")
     ent = resolve(company)
     reprt_code = REPRT.get(report, "11011")
@@ -866,30 +1087,62 @@ def shares_outstanding(company: str, year: int | None = None, report: str = "ann
         })
         if j.get("status") != "000":
             raise DataError(f"DART 주식총수 오류: {j.get('status')} {j.get('message')}")
-        total = common = preferred = treasury = None
-        for r in j.get("list", []):
-            se = (r.get("se") or "").strip()
-            v = _to_int(r.get("now_to_isu_stock_totqy"))
-            if se == "합계":
-                total, treasury = v, _to_int(r.get("tesstk_co"))
-            elif se == "보통주":
-                common = v
-            elif se == "우선주":
-                preferred = v
-        shares = total if total else common
-        if not shares or shares <= 0:
-            raise DataError(f"{ent['corp_name']} 발행주식총수를 못 구함")
+        # ⚠️ now_to_isu_stock_totqy 는 "**현재까지 발행한** 주식의 총수" 로, 이후 소각된
+        # 주식까지 누적된 값이다 — 발행주식수도 유통주식수도 아니다. 예전에 이 필드를 썼는데
+        # 실측(2026-08-27) 결과가 이랬다:
+        #   SK하이닉스 5,721,980,209주(누적) vs 실제 유통 701,691,520주 → 8.15배 과대
+        #   삼성전자   8,975,138,200주(누적) vs 실제 유통 6,630,180,138주 → 1.35배 과대
+        # SK하이닉스는 5.7억주를 발행한 적이 없다. 이 값이 DCF·상증법의 분모로 쓰이면
+        # 주당가치가 그 배수만큼 낮게 나온다.
+        # 올바른 필드: distb_stock_co(유통주식수), tesstk_co(자기주식수).
+        #   발행주식총수 = 유통주식수 + 자기주식수
+        rows = {(r.get("se") or "").strip(): r for r in j.get("list", [])}
+        agg = rows.get("합계") or rows.get("보통주")
+        if agg is None:
+            raise DataError(f"{ent['corp_name']} 주식총수 표에 합계·보통주 행이 없음")
+        distb = _to_int(agg.get("distb_stock_co"))
+        treasury = _to_int(agg.get("tesstk_co")) or 0
+        if not distb or distb <= 0:
+            raise DataError(f"{ent['corp_name']} 유통주식수(distb_stock_co)를 못 구함")
+        issued = distb + treasury
+        shares = distb if (basis or "issued").lower() == "outstanding" else issued
+
+        def _part(se: str, field: str) -> int:
+            r = rows.get(se)
+            return (_to_int(r.get(field)) if r else None) or 0
+
+        common_out, pref_out = _part("보통주", "distb_stock_co"), _part("우선주", "distb_stock_co")
         rcept = (j.get("list") or [{}])[0].get("rcept_no", "")
-        note = (f"보통주 {common:,} / 우선주 {(preferred or 0):,} / 자기주식 {(treasury or 0):,}"
-                if common is not None else None)
+        note = (f"유통주식수 {distb:,} (보통주 {common_out:,} / 우선주 {pref_out:,}) "
+                f"+ 자기주식 {treasury:,} = 발행주식총수 {issued:,}. "
+                f"반환값 = {'유통주식수' if shares == distb and basis == 'outstanding' else '발행주식총수'}. "
+                f"DART 의 '현재까지 발행한 주식의 총수'(누적, 소각분 포함"
+                f"{_to_int(agg.get('now_to_isu_stock_totqy')) or 0:,})는 쓰지 않는다.")
         return Value(
-            value=shares, unit="주", label=f"{ent['corp_name']} 발행주식총수 ({yr})",
+            value=shares, unit="주",
+            label=(f"{ent['corp_name']} "
+                   f"{'유통주식수' if basis == 'outstanding' else '발행주식총수'} ({yr})"),
             provenance=Provenance(
                 source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
                 source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
-                original_field="stockTotqySttus/now_to_isu_stock_totqy(합계)",
+                original_field=("stockTotqySttus/distb_stock_co(합계)" if basis == "outstanding"
+                                else "stockTotqySttus/distb_stock_co + tesstk_co(합계)"),
                 as_of=f"FY{yr}", filing_date=_filing_date(rcept), note=note,
             ),
+            extras={
+                "outstanding": Value(
+                    distb, "주", label=f"{ent['corp_name']} 유통주식수 ({yr})",
+                    provenance=Provenance(
+                        source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
+                        source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
+                        original_field="stockTotqySttus/distb_stock_co(합계)", as_of=f"FY{yr}")),
+                "treasury": Value(
+                    treasury, "주", label=f"{ent['corp_name']} 자기주식수 ({yr})",
+                    provenance=Provenance(
+                        source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
+                        source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
+                        original_field="stockTotqySttus/tesstk_co(합계)", as_of=f"FY{yr}")),
+            },
         )
     except DataError as e:
         if report != "annual":
