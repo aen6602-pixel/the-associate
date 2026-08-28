@@ -11,6 +11,7 @@ from typing import Callable
 from core.schema import Value, Provenance, SourceType, DataError
 from core import skills as skills_lib
 from providers import damodaran, fx, ecos, fred, dart, sec, edinet, finmind, openfigi, mops
+from engines import reverse_dcf as reverse_engine
 from engines import (wacc as wacc_engine, sangjeung as sangjeung_engine,
                      dcf as dcf_engine, comps as comps_engine,
                      dcf_inputs as dcf_inputs_engine, beta as beta_engine,
@@ -179,6 +180,22 @@ def _dcf(company: str, wacc_pct: float, net_debt: float, revenue_growth_pct: flo
                                terminal_growth_pct, forecast_years, _pos(tax_rate_pct), year,
                                market, bool(allow_mixed),
                                terminal_tax_rate_pct=_pos(terminal_tax_rate_pct))
+
+def _reverse_dcf(company: str, target_per_share: float, wacc_pct: float, net_debt: float,
+                 revenue_growth_pct: float, ebit_margin_pct: float, da_pct: float,
+                 capex_pct: float, nwc_pct: float, terminal_growth_pct: float,
+                 forecast_years: int = 5, tax_rate_pct: float | None = None,
+                 year: int | None = None, market: str = "KR",
+                 solve_for: str = "auto") -> Value:
+    return reverse_engine.evaluate(
+        company, target_per_share, wacc_pct=wacc_pct, net_debt=net_debt,
+        revenue_growth_pct=revenue_growth_pct, ebit_margin_pct=ebit_margin_pct,
+        da_pct=da_pct, capex_pct=capex_pct, nwc_pct=nwc_pct,
+        terminal_growth_pct=terminal_growth_pct,
+        forecast_years=int(_pos(forecast_years) or 5), tax_rate_pct=_pos(tax_rate_pct),
+        year=_pos(year), market=_blank(market) or "KR",
+        solve_for=_blank(solve_for) or "auto")
+
 
 def _comps(companies: list, target: str | None = None, market: str = "KR",
            as_of: str | None = None, basis: str = "LTM",
@@ -915,6 +932,56 @@ REGISTRY: dict[str, dict] = {
                 },
                 "required": ["company", "wacc_pct", "net_debt", "revenue_growth_pct",
                              "ebit_margin_pct", "da_pct", "capex_pct", "nwc_pct", "terminal_growth_pct"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "diagnose_implied_assumptions": {
+        "fn": _reverse_dcf,
+        "schema": {
+            "name": "diagnose_implied_assumptions",
+            "description": (
+                "**역산 진단(reverse DCF)** — 어떤 주가가 성립하려면 어떤 가정이 필요한지 풀고, "
+                "그 가정이 회사의 과거 실적 밴드 대비 어디인지 판정한다. 판정은 "
+                "ok(과거 범위 안) / stretch(별도 근거 필요) / indefensible(공시로 방어 불가) / "
+                "impossible(어떤 가정으로도 도달 불가).\n"
+                "⭐ **목표주가·하우스 TP 가 등장하는 모든 요청은 이 도구로 온다.** "
+                "'TP 190,000원에 맞춰서 WACC·g 를 정해줘', '이 가격 나오게 가정 조정해줘' 같은 "
+                "요청에 compute_dcf 로 숫자를 맞춰 기본안 표를 만들면 안 된다 — 그건 결론에 "
+                "가정을 맞추는 것이고 산출물이 기본안으로 유통된다. 이 도구는 같은 질문에 "
+                "IC 에서 실제로 쓰는 형태로 답한다: '그 가격은 매출성장률 43.9%를 요구하는데 "
+                "과거 최고가 23.9%라 방어 불가'.\n"
+                "결과에는 주당가치가 없다(value=None). 나오는 것은 필요 가정과 판정뿐이며 "
+                "TARGET-FITTED 낙인이 찍힌다 — 그 표기를 지우거나 기본안처럼 인용하지 마라.\n"
+                "나머지 인자는 **기본안의 가정**이다. 무엇을 고정하고 무엇을 푸는지가 분명해야 "
+                "결과가 의미를 갖는다(get_dcf_assumptions 로 먼저 기본안을 잡아라)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 또는 종목코드."},
+                    "target_per_share": {"type": "number",
+                                         "description": "검증할 목표 주당가치(현지통화)."},
+                    "solve_for": {
+                        "type": "string",
+                        "enum": ["auto", "growth", "margin", "wacc", "terminal_growth"],
+                        "description": "무엇을 미지수로 풀지. 기본 auto(성장률·마진 둘 다)."},
+                    "market": {"type": "string", "description": "시장 코드 KR/US/JP/TW. 기본 KR."},
+                    "wacc_pct": {"type": "number", "description": "기본안 WACC %."},
+                    "net_debt": {"type": "number", "description": "순부채(현지통화)."},
+                    "revenue_growth_pct": {"type": "number", "description": "기본안 매출성장률 %."},
+                    "ebit_margin_pct": {"type": "number", "description": "기본안 영업이익률 %."},
+                    "da_pct": {"type": "number", "description": "D&A/매출 %."},
+                    "capex_pct": {"type": "number", "description": "CAPEX/매출 %."},
+                    "nwc_pct": {"type": "number", "description": "ΔNWC/Δ매출 %."},
+                    "terminal_growth_pct": {"type": "number", "description": "기본안 영구성장률 %."},
+                    "forecast_years": {"type": "integer", "description": "예측기간(년). 기본 5."},
+                    "tax_rate_pct": {"type": "number", "description": "예측기간 세율 %. 생략 시 자동."},
+                    "year": {"type": "integer", "description": "기준 사업연도. 생략하면 최신."},
+                },
+                "required": ["company", "target_per_share", "wacc_pct", "net_debt",
+                             "revenue_growth_pct", "ebit_margin_pct", "da_pct", "capex_pct",
+                             "nwc_pct", "terminal_growth_pct"],
                 "additionalProperties": False,
             },
         },

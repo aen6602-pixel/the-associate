@@ -197,10 +197,17 @@ def test_high_tv_share_warns_but_still_returns_a_value(monkeypatch):
 
 # ── P1-3: 기준일 요약이 note 앞에 온다 ─────────────────────────────────
 def test_asof_summary_leads_the_note(monkeypatch):
+    """앞자리는 '해석을 바꾸는 정보' 의 몫이다.
+
+    순서는 시장·구조 대조 → 기준일 → 본문 → run 각인. 시장 대조가 첫 자리인 이유는
+    "이 값이 시장과 얼마나 다른가" 가 결론을 읽기 전에 알아야 하는 정보이기 때문이다.
+    """
     _dcf_stubs(monkeypatch, "industrial")
     v = dcf_engine.evaluate("삼성전자", 9.0, -1e12, 8.0, 15.0, 14.0, 12.0, 16.5, 2.0)
     note = v.provenance.note or ""
-    assert note.startswith("[기준일]"), "기준일 요약은 맨 앞에 있어야 한다"
+    assert "[시장·구조 대조]" in note[:120], "시장 대조는 맨 앞에 있어야 한다"
+    body = note.index("[DCF")
+    assert 0 < note.index("[기준일]") < body, "기준일 요약은 본문보다 앞이어야 한다"
     assert "기준일이 서로 다릅니다" in note, "FY 재무 vs 연간 데이터셋 불일치를 알려야 한다"
 
 

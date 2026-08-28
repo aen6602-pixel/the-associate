@@ -11,6 +11,7 @@ EV = Σ UFCF_t/(1+WACC)^t + TV/(1+WACC)^N,   TV = UFCF_N·(1+g)/(WACC−g)
 from __future__ import annotations
 
 from core import runid
+from engines import reality_check
 from core.schema import Provenance, Value, DataError, SourceType
 from providers import dart, sec, edinet, finmind, damodaran
 
@@ -30,7 +31,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
                 tax_rate_pct: float | None = None,
                 year: int | None = None, prefer: str = "CFS",
                 market: str = "KR", allow_mixed: bool = False,
-                terminal_tax_rate_pct: float | None = None) -> dict:
+                terminal_tax_rate_pct: float | None = None,
+                skip_market_check: bool = False) -> dict:
     market = (market or "KR").strip().upper()
     provider = _MARKET_PROVIDERS.get(market)
     if provider is None:
@@ -185,18 +187,35 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     if equity <= 0:
         blocking.append(f"지분가치 음수({equity:,.0f})")
 
+    # ── 시장·구조 대조 (필수 스텝) ─────────────────────────────────────
+    # 요청이 없어도 붙는다. 예전에는 옵션이라 주당 415,204원을 시가 126,800원과 비교조차
+    # 하지 않고 내보냈다(실측). 시가를 못 구해도 구조 검사(TV 비중·증분 ROIC)는 돌린다.
+    _ref = reality_check.market_reference(company, market) if not skip_market_check \
+        else {"market_cap": None, "price": None, "as_of": None, "error": "호출부에서 생략"}
+
     name = rev0.label or company
     for suffix in (" 매출액", " Revenue"):
         if suffix in name:
             name = name.split(suffix)[0]
             break
 
+    _model_for_check = {
+        "rows": rows, "ev": ev, "equity_value": equity, "wacc_pct": float(wacc_pct),
+        "pv_tv": pv_tv, "tv": tv, "per_share": per_share, "net_debt": float(net_debt),
+        "tax_pct": tax,
+    }
+    reality = reality_check.evaluate(_model_for_check, _ref["market_cap"],
+                                     _ref["price"], _ref["as_of"])
+    if _ref["error"]:
+        reality["metrics"]["market_unavailable"] = _ref["error"]
+
     return {
-        "company": name, "market": market,
+        "company": name, "market": market, "reality": reality, "market_ref": _ref,
         "as_of": rev0.provenance.as_of,
         "base_revenue": rev0, "shares": sh, "tax_pct": tax, "tax_prov": tax_prov,
         "terminal_tax_pct": term_tax, "terminal_tax_prov": term_tax_prov,
         "terminal_ufcf": ufcf_n,
+        "tv": tv,
         "wacc_pct": float(wacc_pct), "net_debt": float(net_debt),
         "growth_pct": growth, "ebit_margin_pct": float(ebit_margin_pct),
         "da_pct": da_pct, "capex_pct": capex_pct, "nwc_pct": nwc_pct,
@@ -249,7 +268,10 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
                     "Valuation Date 를 하나로 정하고 이탈 항목을 보고서 상단에 밝히세요."
                     if _mixed else "") + " ")
 
+    # 검증 블록이 결론보다 먼저 온다 — 경고를 뒤에 두면 사람이 안 읽는다는 지적이 맞다.
+    reality_line = reality_check.summary_line(d["reality"], cur)
     note = (
+        reality_line +
         asof_line +
         f"[DCF · UFCF · ⚠️ 성장·마진 등은 사용자 가정] 기준매출 {f(d['base_revenue'].value)}"
         f"({d['base_revenue'].provenance.source}, {d['as_of']}), "
@@ -290,5 +312,37 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         provenance=Provenance(source="계산엔진(engines.dcf)", source_type=SourceType.COMPUTED,
                               source_url="(computed: DART 매출/주식수 + 사용자 가정 + WACC)",
                               as_of=d["as_of"], note=note),
-        extras={"enterprise_value": ev_value, "equity_value": equity_value},
+        extras={"enterprise_value": ev_value, "equity_value": equity_value,
+                **_reality_extras(d, cur)},
     )
+
+
+# 검증 지표를 note 문자열에만 넣으면 LLM 이 다시 파싱해야 하고, 그 과정에서 값이 바뀐다.
+# 셀 단위로 인용할 수 있게 Value 로 펼쳐 준다.
+_REALITY_LABELS = {
+    "premium_pct": ("시가총액 대비 프리미엄", "%"),
+    "per_share_premium_pct": ("주가 대비 프리미엄", "%"),
+    "implied_entry_ev_ebitda": ("내재 진입 EV/EBITDA", "x"),
+    "market_entry_ev_ebitda": ("시장 EV/EBITDA(동일 분모)", "x"),
+    "implied_exit_ev_ebitda": ("내재 청산 EV/EBITDA", "x"),
+    "tv_share_pct": ("EV 중 Terminal Value 비중", "%"),
+    "incremental_roic_pct": ("증분 ROIC", "%"),
+    "roic_wacc_spread_pct": ("증분 ROIC − WACC 스프레드", "%p"),
+}
+
+
+def _reality_extras(d: dict, cur: str) -> dict:
+    r = d.get("reality") or {}
+    out: dict = {}
+    for key, (label, unit) in _REALITY_LABELS.items():
+        v = r.get("metrics", {}).get(key)
+        if isinstance(v, (int, float)):
+            out[f"check_{key}"] = Value(
+                round(v, 2), unit, label=f"{d['company']} {label}",
+                provenance=Provenance(
+                    source="계산엔진(engines.reality_check)", source_type=SourceType.COMPUTED,
+                    source_url="(computed: DCF 결과 × 거래소 시세)", as_of=d["as_of"],
+                    note=("DCF 산출 직후 자동 계산되는 필수 검증 지표. "
+                          + (" / ".join(r.get("flags", [])) if r.get("flags")
+                             else "임계치 이내"))))
+    return out
