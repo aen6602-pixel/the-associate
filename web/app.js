@@ -22,6 +22,7 @@ const state = {
 
 const TIER = {
   authoritative: ['🟢 공식', '정부·규제기관·중앙은행·거래소'],
+  parsed_authoritative: ['🟢 원문', '공시 원문에서 직접 읽음 — 문서ID·인용 있음'],
   reference: ['🔵 참조', '업계 표준 데이터셋(Damodaran 등)'],
   computed: ['🟣 계산', '엔진이 계산한 파생값'],
   assumption: ['🟠 가정', '사용자가 준 가정'],
@@ -546,9 +547,16 @@ async function submitQuestion(question) {
   $('send-btn').disabled = true;
   questionBox.value = '';
   questionBox.style.height = 'auto';
+  dismissRetry();
 
   state.messages.push({ role: 'user', content: question });
   renderChat();
+
+  // 서버가 이 질문을 **받았는지** 를 SSE 의 첫 이벤트(start)로 판정한다.
+  // start 를 못 봤으면 서버 세션에 아무것도 기록되지 않은 상태다 → 입력을 되돌려야 한다.
+  // 예전에는 전송 직후 입력창을 비우고 실패해도 복원하지 않아서, 네트워크가 끊기면
+  // 사용자가 친 질문이 그냥 사라졌다(마감 앞두고 이걸 모르고 기다리면 최악이다).
+  let serverAccepted = false;
 
   // 진행 중 표시 — 실제 tool 호출을 실시간으로 흘려보여준다.
   const live = document.createElement('div');
@@ -601,6 +609,7 @@ async function submitQuestion(question) {
 
         const ev = JSON.parse(line.slice(6));
         if (ev.type === 'start') {
+          serverAccepted = true;      // 여기부터는 서버 세션에 기록된다
           state.sessionId = ev.session_id;
         } else if (ev.type === 'tool_use') {
           append(`<div class="trace-live">🔧 호출: ${esc(ev.name)}(${esc(fmtArgs(ev.input))})</div>`);
@@ -622,12 +631,23 @@ async function submitQuestion(question) {
       }
     }
   } catch (err) {
-    state.messages.push({
-      role: 'assistant',
-      content: `⚠️ ${err.message}`,
-      html: `<p>⚠️ ${esc(err.message)}</p>`,
-      trace: [],
-    });
+    if (serverAccepted) {
+      // 서버는 받았고 처리 중에 끊긴 경우 — 질문은 세션에 남아 있으니 되돌리지 않는다.
+      // 여기서 입력창에 원문을 복원하면 사용자가 같은 질문을 두 번 보내게 된다.
+      state.messages.push({
+        role: 'assistant',
+        content: `⚠️ ${err.message}`,
+        html: `<p>⚠️ ${esc(err.message)}</p>`,
+        trace: [],
+      });
+    } else {
+      // 서버에 도달하지 못했다 — 방금 낙관적으로 그린 사용자 메시지를 걷어내고,
+      // 친 내용을 입력창에 돌려준 뒤 재시도 배너를 띄운다.
+      const last = state.messages[state.messages.length - 1];
+      if (last && last.role === 'user' && last.content === question) state.messages.pop();
+      restoreQuestion(question);
+      showRetry(question, err.message);
+    }
   } finally {
     live.remove();
     state.busy = false;
@@ -636,6 +656,34 @@ async function submitQuestion(question) {
     renderEngine();
     questionBox.focus();
   }
+}
+
+/* ── 전송 실패 복구 ──────────────────────────────────── */
+function restoreQuestion(question) {
+  // 사용자가 그 사이 다른 질문을 치고 있었다면 덮어쓰지 않는다.
+  if (questionBox.value.trim()) return;
+  questionBox.value = question;
+  questionBox.style.height = 'auto';
+  questionBox.style.height = `${Math.min(questionBox.scrollHeight, viewportHeight() * 0.4)}px`;
+}
+
+function dismissRetry() {
+  const el = $('retry-banner');
+  if (el) el.hidden = true;
+}
+
+function showRetry(question, reason) {
+  const el = $('retry-banner');
+  if (!el) return;
+  el.hidden = false;
+  el.querySelector('.retry-msg').textContent =
+    `전송하지 못했습니다 (${reason}). 질문은 입력창에 그대로 있습니다.`;
+  const btn = el.querySelector('.retry-btn');
+  btn.onclick = () => {
+    dismissRetry();
+    const text = questionBox.value.trim() || question;
+    submitQuestion(text);
+  };
 }
 
 /* ── 사이드바 (좁은 화면에서는 오버레이) ─────────────── */

@@ -349,6 +349,59 @@ def historical_ratios(company: str, n: int = 5, year: int | None = None,
     }
 
 
+# ── 유효세율 ──────────────────────────────────────────────────────
+# 세율은 세 가지가 서로 다른 값인데 지금까지 하나로 뭉뚱그려 썼다.
+#   법정(한계)세율   법인세 + 지방소득세. Damodaran corporate_tax_rate. 한계 투자·계속가치용.
+#   회사 유효세율    법인세비용 / 세전이익. 공제·감면·해외세율이 반영된 실제 부담률.
+#   산업 실효세율    Damodaran 산업평균. 회사 값을 못 구할 때의 대용.
+# 실측 지적: 한계세율 26.4% 를 쓰면서 같은 소스의 산업 실효세율 13.91% 가 나란히 조회됐다.
+# 예측기간은 회사가 실제로 낼 세금(정상화 유효세율)이, 계속가치는 한계세율이 맞다.
+EFFECTIVE_TAX_MIN, EFFECTIVE_TAX_MAX = 0.0, 45.0   # 이 밖은 일회성으로 보고 채택하지 않는다
+
+
+def effective_tax_rate(company: str, n: int = 3, year: int | None = None,
+                       report: str = "annual", prefer: str = "CFS") -> Value:
+    """회사 유효세율 = 법인세비용 / 세전이익, n개년 중앙값.
+
+    세전이익은 별도 계정이 없는 경우가 많아 당기순이익 + 법인세비용으로 복원한다.
+    적자 연도(세전이익 <= 0)는 유효세율이 의미를 잃으므로 제외하고, 정상범위를 벗어난
+    연도도 뺀다 — 이월결손금 공제나 일회성 환급이 섞이면 예측기간 가정으로 쓸 수 없다.
+    """
+    tax_s = _series_map(dart.financial_item_nyear(company, "tax_expense", n, year, report, prefer))
+    ni_s = _series_map(dart.financial_item_nyear(company, "net_income", n, year, report, prefer))
+    name = dart.resolve(company)["corp_name"]
+
+    pairs, skipped = [], []
+    for y in sorted(tax_s, reverse=True):
+        t, ni = tax_s.get(y), ni_s.get(y)
+        if t is None or ni is None:
+            continue
+        pretax = ni + t                      # 세전이익 = 순이익 + 법인세비용
+        if pretax <= 0:
+            skipped.append(f"{y}(세전적자)")
+            continue
+        rate = t / pretax * 100.0
+        if not (EFFECTIVE_TAX_MIN <= rate <= EFFECTIVE_TAX_MAX):
+            skipped.append(f"{y}({rate:.1f}%)")
+            continue
+        pairs.append((y, rate))
+
+    if not pairs:
+        raise DataError(
+            f"{name}: 유효세율을 계산할 수 있는 연도가 없습니다"
+            + (f" (제외: {', '.join(skipped)})" if skipped else "")
+            + " → 한계세율(get_corporate_tax_rate) 또는 산업 실효세율을 쓰세요.")
+
+    med = median([r for _, r in pairs])
+    note = (f"{len(pairs)}개년 중앙값. 연도별: "
+            + ", ".join(f"{y} {r:.2f}%" for y, r in pairs)
+            + (f". 제외: {', '.join(skipped)}" if skipped else "")
+            + ". 법인세비용 / (당기순이익 + 법인세비용). 예측기간 세율로 쓰고, "
+              "계속가치에는 한계세율(법정)을 쓰는 것이 표준이다.")
+    return _computed(round(med, 2), "%", f"{name} 유효세율({len(pairs)}개년 중앙값)",
+                     note, f"FY{pairs[0][0]}")
+
+
 # ── 세전 타인자본비용 ─────────────────────────────────────────────
 def cost_of_debt(company: str, year: int | None = None, include_lease: bool = True,
                  report: str = "annual", prefer: str = "CFS") -> Value:

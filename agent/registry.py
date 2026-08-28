@@ -88,7 +88,7 @@ def _read_filing(rcept_no: str, keyword: str | None = None) -> Value:
             source="DART (금융감독원) 공시원문", source_type=SourceType.AUTHORITATIVE,
             source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}",
             original_field="document.xml",
-            note="비정형 서술문 원문. 여기서 추출한 숫자는 반드시 llm_estimate 로 표시할 것.",
+            note="비정형 서술문 원문. 여기서 읽은 숫자는 **parsed_authoritative** 로 표시하고 문서ID와 근거 문장을 함께 인용한다(문서가 특정되므로 추정이 아니다). 문서에 없어서 네가 미루어 계산·추정한 값만 llm_estimate 다.",
         ),
     )
 
@@ -113,7 +113,7 @@ def _read_edinet_filing(docid: str, keyword: str | None = None) -> Value:
             source="EDINET (일본 금융청) 공시원문", source_type=SourceType.AUTHORITATIVE,
             source_url=f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{docid}",
             original_field="documents/{docid}?type=5(CSV)",
-            note="비정형 서술문 원문(일본어). 여기서 추출한 숫자는 반드시 llm_estimate 로 표시할 것.",
+            note="비정형 서술문 원문(일본어). 여기서 읽은 숫자는 **parsed_authoritative** 로 표시하고 문서ID와 근거 문장을 함께 인용한다(문서가 특정되므로 추정이 아니다). 문서에 없어서 네가 미루어 계산·추정한 값만 llm_estimate 다.",
         ),
     )
 
@@ -138,7 +138,9 @@ def _read_sec_filing(cik: str, accession: str, filename: str, keyword: str | Non
         provenance=Provenance(
             source="SEC EDGAR 공시원문", source_type=SourceType.AUTHORITATIVE,
             source_url=result.get("url", ""), original_field="EDGAR Archives 문서",
-            note="비정형 서술문 원문. 여기서 추출한 숫자는 반드시 llm_estimate 로 표시할 것.",
+            note=("비정형 서술문 원문. 여기서 읽은 숫자는 parsed_authoritative 로 표시하고 "
+                  "accession 과 근거 문장을 함께 인용한다. 원문에 없어서 미루어 계산한 값만 "
+                  "llm_estimate 다."),
         ),
     )
 
@@ -168,11 +170,15 @@ def _dcf(company: str, wacc_pct: float, net_debt: float, revenue_growth_pct: flo
          ebit_margin_pct: float, da_pct: float, capex_pct: float, nwc_pct: float,
          terminal_growth_pct: float, forecast_years: int = 5,
          tax_rate_pct: float | None = None, year: int | None = None,
-         market: str = "KR", allow_mixed: bool = False) -> Value:
+         market: str = "KR", allow_mixed: bool = False,
+         terminal_tax_rate_pct: float | None = None) -> Value:
+    # 0 은 "지정 안 함" 으로 본다 — 세율 0% 를 의도적으로 넣는 경우는 없고, LLM 이 선택
+    # 인자를 0 으로 채워 보내는 사고가 실측으로 확인됐다.
     return dcf_engine.evaluate(company, wacc_pct, net_debt, revenue_growth_pct,
                                ebit_margin_pct, da_pct, capex_pct, nwc_pct,
-                               terminal_growth_pct, forecast_years, tax_rate_pct, year,
-                               market, bool(allow_mixed))
+                               terminal_growth_pct, forecast_years, _pos(tax_rate_pct), year,
+                               market, bool(allow_mixed),
+                               terminal_tax_rate_pct=_pos(terminal_tax_rate_pct))
 
 def _comps(companies: list, target: str | None = None, market: str = "KR",
            as_of: str | None = None, basis: str = "LTM",
@@ -317,6 +323,10 @@ def _dcf_assumptions(company: str, n: int = 5, year: int | None = None) -> Value
 
 def _cost_of_debt(company: str, year: int | None = None, include_lease: bool = True) -> Value:
     return dcf_inputs_engine.cost_of_debt(company, _pos(year), include_lease)
+
+
+def _effective_tax(company: str, n: int = 3, year: int | None = None) -> Value:
+    return dcf_inputs_engine.effective_tax_rate(company, int(_pos(n) or 3), _pos(year))
 
 
 def _terminal_growth(country: str = "KR", tenor: str = "10Y") -> Value:
@@ -569,8 +579,9 @@ REGISTRY: dict[str, dict] = {
                 "[fallback 전용] search_dart_filings 로 찾은 공시(rcept_no)의 원문을 읽는다. "
                 "keyword 를 지정하면 그 단어가 등장하는 부분만 앞뒤 문맥과 함께 반환(전체 원문이 아님) — "
                 "찾는 회사명을 keyword 로 넣으면 그 회사가 언급된 문단만 뽑을 수 있다. keyword 미지정 시 "
-                "문서 앞부분만 반환된다. 여기서 읽은 숫자를 답변에 쓸 때는 반드시 source_type=llm_estimate "
-                "로 표시하고 근거 문장을 함께 인용하라(구조화된 XBRL 계정이 아니라 서술문에서 읽은 값이므로)."
+                "문서 앞부분만 반환된다. 여기서 읽은 숫자는 source_type=**parsed_authoritative** 로 "
+                "표시하고 rcpNo 와 근거 문장을 함께 인용하라 — 구조화된 XBRL 계정은 아니지만 공시 "
+                "원문이라 출처가 특정된다. 원문에 없어서 네가 미루어 계산한 값만 llm_estimate 다."
             ),
             "input_schema": {
                 "type": "object",
@@ -613,8 +624,8 @@ REGISTRY: dict[str, dict] = {
             "description": (
                 "[fallback 전용] search_edinet_filings 로 찾은 공시(docID)의 서술문(사업의 내용·주석 등)을 "
                 "읽는다. keyword 지정 시 그 단어가 등장하는 부분만 앞뒤 문맥과 함께 반환(전체 원문이 "
-                "아님) — 찾는 회사명을 keyword 로 넣어라(영문명도 시도). 여기서 읽은 숫자는 반드시 "
-                "source_type=llm_estimate 로 표시하고 근거 문장을 인용하라."
+                "아님) — 찾는 회사명을 keyword 로 넣어라(영문명도 시도). 여기서 읽은 숫자는 "
+                "source_type=parsed_authoritative 로 표시하고 docID 와 근거 문장을 인용하라."
             ),
             "input_schema": {
                 "type": "object",
@@ -659,8 +670,8 @@ REGISTRY: dict[str, dict] = {
             "description": (
                 "[fallback 전용] search_sec_filings 결과의 cik/accession/filename 으로 실제 공시 "
                 "문서를 읽는다. keyword 지정 시 그 단어가 등장하는 부분만 앞뒤 문맥과 함께 반환(전체 "
-                "원문이 아님, 대소문자 무시 검색). 여기서 읽은 숫자는 반드시 source_type=llm_estimate "
-                "로 표시하고 근거 문장을 인용하라."
+                "원문이 아님, 대소문자 무시 검색). 여기서 읽은 숫자는 source_type=parsed_authoritative "
+                "로 표시하고 accession 과 근거 문장을 인용하라."
             ),
             "input_schema": {
                 "type": "object",
@@ -887,7 +898,14 @@ REGISTRY: dict[str, dict] = {
                     "nwc_pct": {"type": "number", "description": "순운전자본 증가분, 매출증가 대비 %. 예: 3"},
                     "terminal_growth_pct": {"type": "number", "description": "영구성장률 %. WACC보다 작아야 함. 예: 2"},
                     "forecast_years": {"type": "integer", "description": "예측기간(년). 기본 5."},
-                    "tax_rate_pct": {"type": "number", "description": "법인세율 %. 미지정 시 Damodaran 해당국 세율."},
+                    "tax_rate_pct": {
+                        "type": "number",
+                        "description": "예측기간 법인세율 %. 미지정 시 한국 기업은 회사 유효세율"
+                                       "(공시에서 자동 계산), 그 외는 Damodaran 해당국 세율."},
+                    "terminal_tax_rate_pct": {
+                        "type": "number",
+                        "description": "계속가치 법인세율 %. 미지정 시 법정 한계세율. 영구 구간은 "
+                                       "공제·감면이 이어진다고 볼 근거가 없어 한계세율이 표준이다."},
                     "year": {"type": "integer", "description": "기준 사업연도. **생략하면 공시가 존재하는 최신 사업연도**를 자동으로 찾는다 — 최신 값을 원하면 넣지 마라. 특정 과거 연도가 필요할 때만 지정한다."},
                     "allow_mixed": {
                         "type": "boolean",
@@ -1252,6 +1270,34 @@ REGISTRY: dict[str, dict] = {
                     "year": {"type": "integer", "description": "사업연도. 생략하면 최신."},
                     "include_lease": {"type": "boolean",
                                       "description": "리스부채를 IBD 에 포함. 기본 true."},
+                },
+                "required": ["company"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "get_effective_tax_rate": {
+        "fn": _effective_tax,
+        "schema": {
+            "name": "get_effective_tax_rate",
+            "description": (
+                "회사의 **유효세율**(법인세비용 ÷ 세전이익, 3개년 중앙값)을 공시에서 계산한다. "
+                "적자 연도와 정상범위(0~45%)를 벗어난 연도는 제외한다.\n"
+                "세율은 세 가지가 서로 다른 값이고 쓰는 자리가 다르다:\n"
+                "· **유효세율(이 도구)** — 공제·감면이 반영된 실제 부담률. **DCF 예측기간**에 쓴다.\n"
+                "· 법정 한계세율(get_corporate_tax_rate) — 법인세+지방소득세. **계속가치**에 쓴다.\n"
+                "· 산업 실효세율(get_industry_benchmarks) — 회사 값을 못 구할 때 대용.\n"
+                "compute_dcf 는 한국 기업이면 이 값을 예측기간 세율로 **자동 적용**하므로 "
+                "보통은 따로 부를 필요가 없다. 세 값의 괴리를 설명해야 할 때 쓴다 "
+                "(실측: 삼성전자 유효 8.42% vs 한계 26.4% — R&D 공제 때문)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 (한국 기업)."},
+                    "n": {"type": "integer", "description": "중앙값을 낼 연수. 기본 3."},
+                    "year": {"type": "integer",
+                             "description": "기준 사업연도. 생략하면 최신."},
                 },
                 "required": ["company"],
                 "additionalProperties": False,

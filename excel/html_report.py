@@ -13,6 +13,7 @@ from core.schema import now_iso
 
 _TIER = {
     "authoritative": ("공식", "#0f9d58"),
+    "parsed_authoritative": ("원문", "#1e8e3e"),
     "reference": ("참조", "#4285f4"),
     "computed": ("계산", "#8e44ad"),
     "assumption": ("가정", "#e67e22"),

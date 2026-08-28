@@ -10,6 +10,7 @@ EV = Σ UFCF_t/(1+WACC)^t + TV/(1+WACC)^N,   TV = UFCF_N·(1+g)/(WACC−g)
 """
 from __future__ import annotations
 
+from core import runid
 from core.schema import Provenance, Value, DataError, SourceType
 from providers import dart, sec, edinet, finmind, damodaran
 
@@ -28,7 +29,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
                 terminal_growth_pct: float, forecast_years: int = 5,
                 tax_rate_pct: float | None = None,
                 year: int | None = None, prefer: str = "CFS",
-                market: str = "KR", allow_mixed: bool = False) -> dict:
+                market: str = "KR", allow_mixed: bool = False,
+                terminal_tax_rate_pct: float | None = None) -> dict:
     market = (market or "KR").strip().upper()
     provider = _MARKET_PROVIDERS.get(market)
     if provider is None:
@@ -36,16 +38,37 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
 
     if provider is dart:
         rev0 = dart.financial_item(company, "revenue", year, "annual", prefer)
-        sh = dart.shares_outstanding(company, year, "annual")
+        # ⚠️ 주당가치의 분모는 **유통주식수**다(자기주식 제외). 기본값 'issued'(발행주식총수
+        # = 유통 + 자기주식)를 쓰면 자기주식만큼 주당가치가 낮게 나오고, 같은 답변 안의
+        # 시가총액 역산(거래소 기준=유통 보통주)과 분모가 어긋난다.
+        # 실측(기아 FY2025): issued 397,672,632 vs outstanding 390,413,249 — 1.86% 괴리를
+        # "기준 차이가 있다"고 고지만 하고 넘어갔었다. 주당가치가 최종 산출물인데 분모가
+        # 미정인 상태였다.
+        sh = dart.shares_outstanding(company, year, "annual", basis="outstanding")
     else:
         rev0 = provider.financial_item(company, "revenue", year)
         sh = provider.shares_outstanding(company, year)
 
-    if tax_rate_pct is None:
-        tax_v = damodaran.corporate_tax_rate(market)
-        tax, tax_prov = tax_v.value, tax_v.provenance
+    # 세율은 두 개다 — 예측기간은 회사가 실제로 내는 유효세율, 계속가치는 법정 한계세율.
+    # 한계세율 하나로 5년을 다 돌리면 공제·감면이 큰 기업의 FCFF 가 과소평가된다
+    # (실측 지적: 한계 26.4% 를 쓰면서 산업 실효 13.91% 가 나란히 조회됐다).
+    marginal_v = damodaran.corporate_tax_rate(market)
+    if tax_rate_pct is not None:
+        tax, tax_prov = float(tax_rate_pct), _assume("법인세율(예측기간)")
     else:
-        tax, tax_prov = float(tax_rate_pct), _assume("법인세율")
+        tax, tax_prov = marginal_v.value, marginal_v.provenance
+        if market.upper() == "KR":
+            try:
+                from engines import dcf_inputs
+
+                eff = dcf_inputs.effective_tax_rate(company, 3, year, "annual", prefer)
+                tax, tax_prov = eff.value, eff.provenance
+            except Exception:  # noqa: BLE001 — 못 구하면 한계세율로 간다(그 사실은 note 에)
+                pass
+    if terminal_tax_rate_pct is not None:
+        term_tax, term_tax_prov = float(terminal_tax_rate_pct), _assume("법인세율(계속가치)")
+    else:
+        term_tax, term_tax_prov = marginal_v.value, marginal_v.provenance
 
     if isinstance(revenue_growth, (int, float)):
         growth = [float(revenue_growth)] * int(forecast_years)
@@ -102,7 +125,11 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
                    "[대안] 순수 금융회사는 FCFF·EV 개념이 성립하지 않습니다 — P/B·잔여이익·"
                    "배당할인 또는 compute_comps 의 자기자본배수를 쓰세요."))
 
-    ufcf_n = rows[-1]["ufcf"]
+    # 계속가치의 기준 UFCF 는 **한계세율로 다시 계산**한다. 예측기간의 유효세율(공제·감면
+    # 반영)이 영구히 이어진다고 보는 것은 근거가 없다 — 영구 구간은 법정세율에 수렴한다.
+    _last = rows[-1]
+    term_taxr = term_tax / 100.0
+    ufcf_n = (_last["ebit"] * (1 - term_taxr) + _last["da"] - _last["capex"] - _last["dnwc"])
     tv = ufcf_n * (1 + gt) / (wacc - gt)
     pv_tv = tv / ((1 + wacc) ** n)
     ev = pv_sum + pv_tv
@@ -131,6 +158,15 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     if ev > 0 and pv_tv / ev > 0.9:
         warnings.append(f"EV 의 {pv_tv / ev * 100:.0f}% 가 Terminal Value 입니다 "
                         f"(90% 초과) — 예측기간 가정보다 g·WACC 에 결과가 지배됩니다.")
+    # 우선주가 있으면 지분가치는 보통주와 우선주가 나눠 갖는다. 분모에 둘 다 넣으면
+    # 결과는 "보통주 1주" 가 아니라 혼합 기준이 된다 — 삼성전자·현대차처럼 우선주 비중이
+    # 큰 종목에서 이 차이가 material 하므로 숫자와 함께 반드시 알린다.
+    pref = (sh.extras or {}).get("preferred_outstanding")
+    if pref is not None and pref.value:
+        warnings.append(
+            f"우선주 {pref.value:,}주가 분모에 포함돼 있어 이 주당가치는 보통주 전용이 아니라 "
+            f"보통주+우선주 혼합 기준입니다. 우선주는 통상 보통주 대비 할인 거래되므로 "
+            f"보통주 목표가로 그대로 쓰지 마세요(별도 배분 필요).")
     if allow_mixed:
         warnings.append(
             "allow_mixed=True 로 금융부문 게이트를 우회했습니다 — WACC 의 부채비중과 EV 의 "
@@ -159,6 +195,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
         "company": name, "market": market,
         "as_of": rev0.provenance.as_of,
         "base_revenue": rev0, "shares": sh, "tax_pct": tax, "tax_prov": tax_prov,
+        "terminal_tax_pct": term_tax, "terminal_tax_prov": term_tax_prov,
+        "terminal_ufcf": ufcf_n,
         "wacc_pct": float(wacc_pct), "net_debt": float(net_debt),
         "growth_pct": growth, "ebit_margin_pct": float(ebit_margin_pct),
         "da_pct": da_pct, "capex_pct": capex_pct, "nwc_pct": nwc_pct,
@@ -178,10 +216,23 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
              ebit_margin_pct: float, da_pct: float, capex_pct: float, nwc_pct: float,
              terminal_growth_pct: float, forecast_years: int = 5,
              tax_rate_pct: float | None = None, year: int | None = None,
-             market: str = "KR", allow_mixed: bool = False) -> Value:
+             market: str = "KR", allow_mixed: bool = False,
+             terminal_tax_rate_pct: float | None = None) -> Value:
     d = build_model(company, wacc_pct, net_debt, revenue_growth, ebit_margin_pct,
                     da_pct, capex_pct, nwc_pct, terminal_growth_pct, forecast_years,
-                    tax_rate_pct, year, market=market, allow_mixed=allow_mixed)
+                    tax_rate_pct, year, market=market, allow_mixed=allow_mixed,
+                    terminal_tax_rate_pct=terminal_tax_rate_pct)
+    # 재현성 각인 — 같은 입력이면 같은 run_id 가 나오므로 재실행이 곧 검증이 된다.
+    # (에이전트가 "재현 가능한 compute_dcf 결과가 없어 철회한다" 고 말한 사례 대응)
+    run = runid.stamp("dcf", {
+        "company": company, "market": market, "wacc_pct": wacc_pct,
+        "net_debt": net_debt, "revenue_growth": revenue_growth,
+        "ebit_margin_pct": ebit_margin_pct, "da_pct": da_pct, "capex_pct": capex_pct,
+        "nwc_pct": nwc_pct, "terminal_growth_pct": terminal_growth_pct,
+        "forecast_years": forecast_years, "tax_rate_pct": tax_rate_pct,
+        "year": year, "allow_mixed": allow_mixed,
+        "terminal_tax_rate_pct": terminal_tax_rate_pct})
+    d["run"] = run
     f = lambda x: f"{x:,.0f}"
     cur = _CURRENCY.get(d["market"], d["market"])
 
@@ -202,13 +253,17 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         asof_line +
         f"[DCF · UFCF · ⚠️ 성장·마진 등은 사용자 가정] 기준매출 {f(d['base_revenue'].value)}"
         f"({d['base_revenue'].provenance.source}, {d['as_of']}), "
-        f"발행주식 {d['shares'].value:,}주. WACC {d['wacc_pct']}%, terminal g {d['terminal_growth_pct']}%, "
-        f"세율 {d['tax_pct']}%. 예측 {d['forecast_years']}년 → PV(UFCF) {f(d['pv_ufcf_sum'])} + PV(TV) {f(d['pv_tv'])} "
+        f"유통주식 {d['shares'].value:,}주(자기주식 제외). "
+        f"WACC {d['wacc_pct']}%, terminal g {d['terminal_growth_pct']}%, "
+        f"세율 예측기간 {d['tax_pct']}%({d['tax_prov'].source}) · "
+        f"계속가치 {d['terminal_tax_pct']}%(한계세율). 예측 {d['forecast_years']}년 → PV(UFCF) {f(d['pv_ufcf_sum'])} + PV(TV) {f(d['pv_tv'])} "
         f"= EV {f(d['ev'])}. 순부채 {f(d['net_debt'])} 차감 → 지분가치 {f(d['equity_value'])} "
         f"→ 주당 {f(d['per_share'])}{cur}."
     )
     if d["warnings"]:
         note += " ⚠️ [검증 경고] " + " | ".join(d["warnings"])
+    # 재현 각인은 맨 뒤 — 앞자리는 기준일·NM 처럼 해석을 바꾸는 정보의 몫이다.
+    note += f" [{runid.line(run)}]"
     if d["per_share_is_nm"]:
         note = ("⛔ [산출 불가 · NM] " + ", ".join(d["blocking"])
                 + " → 이 입력 조합의 주당가치는 밸류에이션으로 해석할 수 없어 값을 반환하지 "

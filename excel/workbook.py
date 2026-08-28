@@ -16,8 +16,10 @@ from core.schema import Provenance, SourceType
 
 _TIER_KO = {
     SourceType.AUTHORITATIVE: "공식(정부·거래소·중앙은행)",
+    SourceType.PARSED_AUTHORITATIVE: "공시원문(직접 읽음 — 문서ID·인용 있음)",
     SourceType.REFERENCE: "참조(업계표준 데이터셋)",
     SourceType.COMPUTED: "계산(엔진)",
+    SourceType.ASSUMPTION: "가정(사용자 입력)",
     SourceType.LLM_ESTIMATE: "LLM 추정 — 검증 필요",
 }
 

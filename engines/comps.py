@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import statistics
 
+from core import runid
 from core.schema import Provenance, Value, DataError, SourceType
 from engines import market_data as md
 from providers import fx
@@ -326,6 +327,10 @@ def evaluate(companies: list | str, target: str | None = None, market: str = "KR
              as_of: str | None = None, basis: str = "LTM",
              display_currency: str = "USD") -> Value:
     m = build_model(companies, target, market, as_of, basis, display_currency)
+    run = runid.stamp("comps", {"companies": companies, "target": target,
+                                 "market": market, "as_of": as_of, "basis": basis,
+                                 "display_currency": display_currency})
+    m["run"] = run
     lines = []
     for r in m["rows"]:
         parts = []
@@ -356,6 +361,7 @@ def evaluate(companies: list | str, target: str | None = None, market: str = "KR
         note += f" 제외: {'; '.join(m['errors'])}."
     if m["warnings"]:
         note += " ⚠️ " + " ⚠️ ".join(m["warnings"])
+    note += f" [{runid.line(run)}]"
 
     primary = None
     if m["target"]:

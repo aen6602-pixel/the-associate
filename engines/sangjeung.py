@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from core import runid
 from core.schema import Provenance, Value, DataError, SourceType
 from providers import dart
 
@@ -196,6 +197,11 @@ def evaluate(company: str, year: int | None = None,
     """상증법 보충적 평가액(1주당). 결과 단위 KRW/주, computed 등급."""
     m = build_model(company, year, real_estate_heavy, report, nav_only,
                     largest_shareholder, sme)
+    run = runid.stamp("sangjeung", {
+        "company": company, "year": year, "real_estate_heavy": real_estate_heavy,
+        "report": report, "nav_only": nav_only,
+        "largest_shareholder": largest_shareholder, "sme": sme})
+    m["run"] = run
     s, r = m["ni_series"], m["results"]
     fmt = lambda x: f"{x:,.0f}"
 
@@ -226,6 +232,7 @@ def evaluate(company: str, year: int | None = None,
                   f"→ 가중평균 {fmt(r['weighted_ni'])} → 1주 {fmt(r['ni_per_share'])} "
                   f"÷ {m['cap_rate']:.0%} = 순손익가치 {fmt(r['income_value'])}원/주. ")
     note = (
+
         f"[상증법 보충적평가 · {m['fs_label']} 기준 · ⚠️세무조정·시가평가 미반영 근사]  "
         f"[법령판정] {' / '.join(judge)}.  "
         f"발행주식총수 {m['shares'].value:,}주(DART). "
@@ -240,6 +247,7 @@ def evaluate(company: str, year: int | None = None,
           "순자산가액의 자산별 보충적 평가와 영업권 가산(상증령 §59②), 부동산의 시가평가. "
           "자산구성 판정은 장부가액 계정 기준 근사이므로 실제 세무 판정과 다를 수 있습니다."
     )
+    note += f" [{runid.line(run)}]"
     return Value(
         value=round(r["value"]), unit="KRW/주",
         label=f"{m['company']} 상증법 1주 평가액 ({m['as_of']})",

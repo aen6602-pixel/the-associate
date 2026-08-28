@@ -149,6 +149,11 @@
       <div class="chat" id="chat"></div>
     </div>
 
+    <!-- 전송이 서버에 닿지 못했을 때만 뜬다. 입력 원문은 입력창에 복원된다. -->
+    <div class="retry-banner" id="retry-banner" hidden>
+      <span class="retry-msg"></span>
+      <button type="button" class="ghost sm retry-btn">다시 보내기</button>
+    </div>
     <form class="composer" id="composer">
       <textarea id="question" rows="1" placeholder="Instruct the associate…  (밸류에이션·데이터 질문)"
                 autocomplete="off"></textarea>

@@ -24,12 +24,34 @@ class SourceType:
     """
 
     AUTHORITATIVE = "authoritative"   # 정부·규제기관·중앙은행·거래소 공식 (DART, SEC, ECOS, FRED, KRX, EDINET)
+    # 공시 원문에서 **직접 읽은** 값. 구조화 계정(XBRL)이 아니라 서술문·표에서 뽑았지만,
+    # 출처 문서와 인용 문장이 특정되므로 추정이 아니다.
+    #
+    # 왜 따로 두는가 — 예전에는 이런 값도 전부 llm_estimate 였다. 그 결과 공시에 명확히
+    # 적힌 CAPEX·비지배지분이 "낮은 등급" 으로 분류됐고, 다음 턴에서 "도구로 검증된 값이
+    # 아니다" 며 철회되는 연쇄까지 일어났다(실측). 등급이 3단계뿐이라 "원문에서 읽었지만
+    # XBRL 은 아닌 값" 을 담을 칸이 없어서 생긴 문제다.
+    #
+    # 이 등급을 붙이려면 (1) 출처 문서 ID(rcpNo/docID/accession)와 (2) 근거 문장 또는
+    # 표 위치가 provenance 에 있어야 한다. 둘 중 하나라도 없으면 llm_estimate 다.
+    PARSED_AUTHORITATIVE = "parsed_authoritative"
     REFERENCE = "reference"           # 업계 표준 참조 데이터셋 (Damodaran 등)
     COMPUTED = "computed"             # 우리 엔진이 다른 Value 로부터 계산 (WACC, EV, 멀티플)
     ASSUMPTION = "assumption"         # 사용자가 명시적으로 입력한 가정 (성장률·마진·terminal g 등)
     LLM_ESTIMATE = "llm_estimate"     # 소스가 없어 LLM 이 추정 — 반드시 이 라벨
 
-    ALL = {AUTHORITATIVE, REFERENCE, COMPUTED, ASSUMPTION, LLM_ESTIMATE}
+    ALL = {AUTHORITATIVE, PARSED_AUTHORITATIVE, REFERENCE, COMPUTED, ASSUMPTION, LLM_ESTIMATE}
+
+    # 신뢰 순서(높을수록 신뢰). "이 값을 다음 턴에서 재사용해도 되는가" 판단에 쓴다 —
+    # RETRACTABLE 미만만 반증 없이 철회할 수 있다.
+    RANK = {AUTHORITATIVE: 5, PARSED_AUTHORITATIVE: 4, REFERENCE: 3,
+            COMPUTED: 3, ASSUMPTION: 2, LLM_ESTIMATE: 1}
+    RETRACTABLE_BELOW = 4   # 4 이상(공시 원문 이상)은 명시적 반증 없이 철회하지 않는다
+
+
+def is_sourced(source_type: str) -> bool:
+    """출처 문서가 특정되는 등급인가 — 재사용·인용이 가능한지 판단에 쓴다."""
+    return SourceType.RANK.get(source_type, 0) >= SourceType.RETRACTABLE_BELOW
 
 
 @dataclass

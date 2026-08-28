@@ -333,6 +333,15 @@ button:disabled { opacity: .5; cursor: default; }
 .md th { background: var(--panel-2); font-weight: 600; }
 .md tbody tr:nth-child(even) { background: #10161F; }
 
+/* 전송 실패 배너 — 입력창 바로 위에 붙어야 사용자가 놓치지 않는다. */
+.retry-banner {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  margin: 0 2.2rem; padding: .55rem .75rem; border-radius: var(--radius);
+  background: #3A1A1E; border: 1px solid #6B2A31; color: #FFB4BA; font-size: .85rem;
+}
+.retry-banner[hidden] { display: none; }
+.retry-banner .retry-msg { flex: 1; min-width: 12rem; }
+
 /* ── 입력창 ─────────────────────────────────────────── */
 .composer { display: flex; gap: .6rem; align-items: flex-end;
             padding: .9rem 2.2rem 1.3rem; border-top: 1px solid var(--line); background: var(--bg); }
@@ -436,6 +445,7 @@ button:disabled { opacity: .5; cursor: default; }
     padding: 3.1rem max(1rem, env(safe-area-inset-right)) .8rem
              max(1rem, env(safe-area-inset-left));
   }
+  .retry-banner { margin: 0 max(.9rem, env(safe-area-inset-left)) .4rem; }
   .composer {
     padding: .7rem max(.9rem, env(safe-area-inset-right))
              calc(.7rem + env(safe-area-inset-bottom))

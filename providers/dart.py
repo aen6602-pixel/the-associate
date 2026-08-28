@@ -1142,6 +1142,23 @@ def shares_outstanding(company: str, year: int | None = None, report: str = "ann
                         source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
                         source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
                         original_field="stockTotqySttus/tesstk_co(합계)", as_of=f"FY{yr}")),
+                # 보통주·우선주를 나눠 노출한다. 합계만 주면 호출부가 "이 주당가치가 보통주
+                # 기준인가" 를 판단할 수 없다 — 삼성전자·현대차는 우선주 비중이 커서 이게
+                # material 하다.
+                "common_outstanding": Value(
+                    common_out, "주", label=f"{ent['corp_name']} 보통주 유통주식수 ({yr})",
+                    provenance=Provenance(
+                        source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
+                        source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
+                        original_field="stockTotqySttus/distb_stock_co(보통주)",
+                        as_of=f"FY{yr}")),
+                "preferred_outstanding": Value(
+                    pref_out, "주", label=f"{ent['corp_name']} 우선주 유통주식수 ({yr})",
+                    provenance=Provenance(
+                        source="DART (금융감독원)", source_type=SourceType.AUTHORITATIVE,
+                        source_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}",
+                        original_field="stockTotqySttus/distb_stock_co(우선주)",
+                        as_of=f"FY{yr}")),
             },
         )
     except DataError as e:
