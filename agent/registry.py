@@ -12,10 +12,17 @@ from core.schema import Value, Provenance, SourceType, DataError
 from core import skills as skills_lib
 from providers import damodaran, fx, ecos, fred, dart, sec, edinet, finmind, openfigi, mops
 from engines import reverse_dcf as reverse_engine
+from engines import scenarios as scenarios_engine
 from engines import (wacc as wacc_engine, sangjeung as sangjeung_engine,
                      dcf as dcf_engine, comps as comps_engine,
                      dcf_inputs as dcf_inputs_engine, beta as beta_engine,
                      market_data, business_mix)
+
+# 연도별 경로를 받는 인자의 공통 설명. "초기 둔화 후 정상화" 같은 경로는 단일값으로
+# 만들 수 없고, 5년 평균 하나를 5년 깔면 과거 국면이 미래에 그대로 복사된다.
+_VEC = ("스칼라(하나의 값) 또는 **연도별 배열**. 배열이면 '초기 둔화 후 정상화' 같은 "
+        "경로를 만들 수 있다(예: [8, 6, 4, 3, 3]). 길이가 예측기간보다 짧으면 마지막 "
+        "값이 이어진다.")
 
 _ITEM_ENUM = ["revenue", "operating_income", "net_income",
              "total_assets", "total_liabilities", "total_equity",
@@ -183,6 +190,28 @@ def _dcf(company: str, wacc_pct: float, net_debt: float, revenue_growth_pct: flo
                                terminal_tax_rate_pct=_pos(terminal_tax_rate_pct),
                                mid_year=bool(mid_year),
                                exit_multiple=_pos(exit_multiple))
+
+def _scenarios(company: str, wacc_pct: float, net_debt: float, revenue_growth_pct,
+               ebit_margin_pct, da_pct: float, capex_pct: float, nwc_pct: float,
+               terminal_growth_pct: float, forecast_years: int = 5,
+               tax_rate_pct: float | None = None, year: int | None = None,
+               market: str = "KR", allow_mixed: bool = False,
+               bull_growth_delta_pct: float = 2.0, bull_margin_delta_pct: float = 1.0,
+               bear_growth_delta_pct: float = -2.0, bear_margin_delta_pct: float = -1.0,
+               probabilities: list | None = None) -> Value:
+    return scenarios_engine.evaluate(
+        company, wacc_pct=wacc_pct, net_debt=net_debt,
+        revenue_growth=revenue_growth_pct, ebit_margin_pct=ebit_margin_pct,
+        da_pct=da_pct, capex_pct=capex_pct, nwc_pct=nwc_pct,
+        terminal_growth_pct=terminal_growth_pct,
+        forecast_years=int(_pos(forecast_years) or 5), tax_rate_pct=_pos(tax_rate_pct),
+        year=_pos(year), market=_blank(market) or "KR", allow_mixed=bool(allow_mixed),
+        bull_growth_delta_pct=float(bull_growth_delta_pct),
+        bull_margin_delta_pct=float(bull_margin_delta_pct),
+        bear_growth_delta_pct=float(bear_growth_delta_pct),
+        bear_margin_delta_pct=float(bear_margin_delta_pct),
+        probabilities=probabilities or None)
+
 
 def _reverse_dcf(company: str, target_per_share: float, wacc_pct: float, net_debt: float,
                  revenue_growth_pct: float, ebit_margin_pct: float, da_pct: float,
@@ -915,8 +944,14 @@ REGISTRY: dict[str, dict] = {
                     },
                     "wacc_pct": {"type": "number", "description": "WACC %, 예: 8.5"},
                     "net_debt": {"type": "number", "description": "순부채(현지통화). 순현금이면 음수. 예: -50000000000000"},
-                    "revenue_growth_pct": {"type": "number", "description": "연 매출성장률 %(전 기간 동일 적용). 예: 5"},
-                    "ebit_margin_pct": {"type": "number", "description": "영업이익률 %. 예: 12"},
+                    "revenue_growth_pct": {
+                        "description": "매출성장률 %. " + _VEC,
+                        "anyOf": [{"type": "number"},
+                                  {"type": "array", "items": {"type": "number"}}]},
+                    "ebit_margin_pct": {
+                        "description": "영업이익률 %. " + _VEC,
+                        "anyOf": [{"type": "number"},
+                                  {"type": "array", "items": {"type": "number"}}]},
                     "da_pct": {"type": "number", "description": "감가상각비(D&A) 매출 대비 %. 예: 8"},
                     "capex_pct": {"type": "number", "description": "Capex 매출 대비 %. 예: 10"},
                     "nwc_pct": {"type": "number", "description": "순운전자본 증가분, 매출증가 대비 %. 예: 3"},
@@ -950,6 +985,64 @@ REGISTRY: dict[str, dict] = {
                 },
                 "required": ["company", "wacc_pct", "net_debt", "revenue_growth_pct",
                              "ebit_margin_pct", "da_pct", "capex_pct", "nwc_pct", "terminal_growth_pct"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "compute_scenarios": {
+        "fn": _scenarios,
+        "schema": {
+            "name": "compute_scenarios",
+            "description": (
+                "Base/Bull/Bear **세 시나리오를 한 번에** 산출한다. 기본안 가정 하나와 "
+                "성장·마진 델타만 받아, 시나리오 사이에 무엇을 얼마나 다르게 봤는지가 "
+                "명시된다(세 벌의 가정 세트를 따로 받으면 무엇이 바뀌었는지 추적이 안 된다).\n"
+                "결과는 **범위**가 본체다 — extras 에 bear/base/bull 주당가치가 들어오고, "
+                "note 에 범위와 Bull/Bear 배율이 나온다. 확률가중값도 계산되지만 세 "
+                "시나리오를 다시 하나의 점으로 뭉개는 것이라 참고용이며, 결론은 범위로 "
+                "제시하라.\n"
+                "단일 값 하나가 필요한 게 아니라 '얼마나 흔들리는가' 가 질문이면 compute_dcf "
+                "대신 이걸 쓴다. IC 자료 형태에 가깝다."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string", "description": "회사명 또는 종목코드."},
+                    "market": {"type": "string", "description": "시장 코드 KR/US/JP/TW. 기본 KR."},
+                    "wacc_pct": {"type": "number", "description": "WACC %."},
+                    "net_debt": {"type": "number", "description": "순부채(현지통화)."},
+                    "revenue_growth_pct": {
+                        "description": "기본안 매출성장률 %. " + _VEC,
+                        "anyOf": [{"type": "number"},
+                                  {"type": "array", "items": {"type": "number"}}]},
+                    "ebit_margin_pct": {
+                        "description": "기본안 영업이익률 %. " + _VEC,
+                        "anyOf": [{"type": "number"},
+                                  {"type": "array", "items": {"type": "number"}}]},
+                    "da_pct": {"type": "number", "description": "D&A/매출 %."},
+                    "capex_pct": {"type": "number", "description": "CAPEX/매출 %."},
+                    "nwc_pct": {"type": "number", "description": "NWC/매출 % (수준 기준)."},
+                    "terminal_growth_pct": {"type": "number", "description": "영구성장률 %."},
+                    "forecast_years": {"type": "integer", "description": "예측기간(년). 기본 5."},
+                    "tax_rate_pct": {"type": "number",
+                                     "description": "예측기간 세율 %. 생략 시 자동(유효세율)."},
+                    "year": {"type": "integer", "description": "기준 사업연도. 생략하면 최신."},
+                    "bull_growth_delta_pct": {"type": "number",
+                                              "description": "Bull 성장률 가산 %p. 기본 +2."},
+                    "bull_margin_delta_pct": {"type": "number",
+                                              "description": "Bull 마진 가산 %p. 기본 +1."},
+                    "bear_growth_delta_pct": {"type": "number",
+                                              "description": "Bear 성장률 가산 %p. 기본 −2."},
+                    "bear_margin_delta_pct": {"type": "number",
+                                              "description": "Bear 마진 가산 %p. 기본 −1."},
+                    "probabilities": {
+                        "type": "array", "items": {"type": "number"},
+                        "description": "[bear, base, bull] 확률. 기본 [0.25, 0.5, 0.25]. "
+                                       "합이 1이 아니어도 정규화된다."},
+                },
+                "required": ["company", "wacc_pct", "net_debt", "revenue_growth_pct",
+                             "ebit_margin_pct", "da_pct", "capex_pct", "nwc_pct",
+                             "terminal_growth_pct"],
                 "additionalProperties": False,
             },
         },

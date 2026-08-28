@@ -39,7 +39,7 @@ def _assume(desc: str) -> Provenance:
 
 
 def build_model(company: str, wacc_pct: float, net_debt: float,
-                revenue_growth, ebit_margin_pct: float,
+                revenue_growth, ebit_margin_pct,
                 da_pct: float, capex_pct: float, nwc_pct: float,
                 terminal_growth_pct: float, forecast_years: int = 5,
                 tax_rate_pct: float | None = None,
@@ -101,14 +101,22 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     if wacc <= gt:
         raise DataError(f"WACC({wacc_pct}%)이 terminal growth({terminal_growth_pct}%)보다 커야 TV가 유효합니다.")
 
-    m = float(ebit_margin_pct) / 100.0
+    # 마진도 연도별 벡터를 받는다 — "초기 둔화 후 정상화" 같은 경로를 단일값으로는 못 만든다.
+    # 길이가 모자라면 마지막 값을 이어 붙인다(성장률 벡터와 같은 규약).
+    if isinstance(ebit_margin_pct, (int, float)):
+        margins = [float(ebit_margin_pct)] * n
+    else:
+        margins = [float(x) for x in ebit_margin_pct]
+        if not margins:
+            raise DataError("영업이익률(ebit_margin_pct)을 1개 이상 입력하세요.")
+        margins = (margins + [margins[-1]] * n)[:n]
     da, capex, nwc, taxr = da_pct / 100.0, capex_pct / 100.0, nwc_pct / 100.0, tax / 100.0
 
     base_rev, shares = rev0.value, sh.value
     rows, prev, pv_sum = [], base_rev, 0.0
     for t in range(1, n + 1):
         rev = prev * (1 + growth[t - 1] / 100.0)
-        ebit = rev * m
+        ebit = rev * (margins[t - 1] / 100.0)
         nopat = ebit * (1 - taxr)
         d_a, cap = rev * da, rev * capex
         dnwc = (rev - prev) * nwc
@@ -239,7 +247,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     except Exception:  # noqa: BLE001
         _rf = None
     assumptions = assumption_check.check(
-        revenue_growth_pct=(sum(growth) / len(growth)), ebit_margin_pct=float(ebit_margin_pct),
+        revenue_growth_pct=(sum(growth) / len(growth)),
+        ebit_margin_pct=(sum(margins) / len(margins)),
         da_pct=float(da_pct), capex_pct=float(capex_pct),
         terminal_growth_pct=float(terminal_growth_pct), wacc_pct=float(wacc_pct),
         growth_history=_gh, margin_history=_mh, risk_free_pct=_rf, forecast_years=n)
@@ -272,13 +281,17 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
         "as_of": rev0.provenance.as_of,
         "base_revenue": rev0, "shares": sh, "tax_pct": tax, "tax_prov": tax_prov,
         "mid_year": bool(mid_year),
+        "growth_path": growth, "margin_path": margins,
         "tv_method": tv_method, "tv_gordon": tv_gordon, "tv_exit": tv_exit,
         "implied_exit_multiple": implied_exit_mult, "exit_multiple": exit_multiple,
         "terminal_tax_pct": term_tax, "terminal_tax_prov": term_tax_prov,
         "terminal_ufcf": ufcf_n,
         "tv": tv,
         "wacc_pct": float(wacc_pct), "net_debt": float(net_debt),
-        "growth_pct": growth, "ebit_margin_pct": float(ebit_margin_pct),
+        # 벡터를 받을 수 있으므로 원본을 float 로 강제하지 않는다. 스칼라 소비처(엑셀
+        # 워크북 등)가 쓸 수 있게 평균을 대표값으로 함께 둔다.
+        "growth_pct": growth, "ebit_margin_pct": (sum(margins) / len(margins)),
+        "ebit_margin_input": ebit_margin_pct,
         "da_pct": da_pct, "capex_pct": capex_pct, "nwc_pct": nwc_pct,
         "terminal_growth_pct": float(terminal_growth_pct), "forecast_years": n,
         "rows": rows, "tv": tv, "pv_tv": pv_tv, "pv_ufcf_sum": pv_sum,
@@ -293,7 +306,7 @@ _CURRENCY = {"KR": "KRW", "US": "USD", "JP": "JPY", "TW": "TWD"}
 
 
 def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
-             ebit_margin_pct: float, da_pct: float, capex_pct: float, nwc_pct: float,
+             ebit_margin_pct, da_pct: float, capex_pct: float, nwc_pct: float,
              terminal_growth_pct: float, forecast_years: int = 5,
              tax_rate_pct: float | None = None, year: int | None = None,
              market: str = "KR", allow_mixed: bool = False,
@@ -342,6 +355,10 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         f"[DCF · UFCF · ⚠️ 성장·마진 등은 사용자 가정] 기준매출 {f(d['base_revenue'].value)}"
         f"({d['base_revenue'].provenance.source}, {d['as_of']}), "
         f"유통주식 {d['shares'].value:,}주(자기주식 제외). "
+        + (f"성장 경로 {'/'.join(f'{g:g}' for g in d['growth_path'])}%. "
+           if len(set(d['growth_path'])) > 1 else "")
+        + (f"마진 경로 {'/'.join(f'{x:g}' for x in d['margin_path'])}%. "
+           if len(set(d['margin_path'])) > 1 else "") + ""
         f"WACC {d['wacc_pct']}%, terminal g {d['terminal_growth_pct']}%, "
         f"세율 예측기간 {d['tax_pct']}%({d['tax_prov'].source}) · "
         f"계속가치 {d['terminal_tax_pct']}%(한계세율). "

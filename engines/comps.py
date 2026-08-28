@@ -81,6 +81,13 @@ def _row(company: str, market: str, as_of: str, use_ltm: bool) -> dict:
         ni = take("net_income", lambda: (md.point(spec, "net_income"), "FY"))
         rev = take("revenue", lambda: (md.point(spec, "revenue"), "FY"))
     eq = take("equity", lambda: md.point(spec, "total_equity"))
+    # 잔액(재무상태표) 항목은 기간이 아니라 시점이다 — LTM/FY 와 성격이 달라 그대로 표기한다.
+    for _k in ("equity", "net_debt"):
+        _v = row["values"].get(_k)
+        if _v is not None and _k not in row["basis"]:
+            row["basis"][_k] = (_v.provenance.as_of or "시점")
+    if mc is not None:
+        row["basis"]["market_cap"] = mc.provenance.as_of or "종가일"
 
     # 파생값
     if ebit is not None and da is not None:
@@ -104,8 +111,14 @@ def _row(company: str, market: str, as_of: str, use_ltm: bool) -> dict:
             "net_income": ni.value if ni else None,
             "equity": eq.value if eq else None}
     row["multiples"] = {}
+    row["multiple_basis"] = {}
     for key, label, num_k, den_k, _ in MULTIPLES:
         num, den = nums.get(num_k), dens.get(den_k)
+        # 기준은 배수마다 다르다 — 분모가 무엇이냐로 정해진다. EV 배수는 분자가 종가일
+        # 시가총액이고 분모가 기간 손익이라, 둘을 함께 적어야 셀만 보고도 무엇이 섞였는지 안다.
+        den_basis = row["basis"].get(den_k, "?")
+        num_basis = row["basis"].get("market_cap", "?")
+        row["multiple_basis"][key] = den_basis
         if num is None or den is None:
             row["multiples"][key] = None
             continue
@@ -115,6 +128,7 @@ def _row(company: str, market: str, as_of: str, use_ltm: bool) -> dict:
             row["nm"][key] = f"{den_k} {den:,.0f} ≤ 0 → {label} 해석 불가(NM)"
             continue
         row["multiples"][key] = num / den
+    row["price_basis"] = row["basis"].get("market_cap", "?")
     return row
 
 
@@ -384,12 +398,46 @@ def evaluate(companies: list | str, target: str | None = None, market: str = "KR
 
 
 def _extras(m: dict) -> dict:
-    """UI·LLM 이 셀 단위로 인용할 수 있게 주요 Value 를 평평하게 펼친다."""
+    """UI·LLM 이 셀 단위로 인용할 수 있게 주요 Value 를 평평하게 펼친다.
+
+    배수도 함께 올린다 — 숫자와 기준(LTM/FY)이 같은 Value 에 붙어 있어야 표에 옮길 때
+    떨어지지 않는다. note 문자열에만 두면 LLM 이 다시 파싱해야 하고 그 과정에서 빠진다.
+    """
     out: dict = {}
     for r in m["rows"]:
         for k, v in r["values"].items():
             if isinstance(v, Value):
                 out[f"{r['name']}.{k}"] = v
+        for key, label, _num_k, _den_k, dp in MULTIPLES:
+            mult = r["multiples"].get(key)
+            basis = r.get("multiple_basis", {}).get(key, "?")
+            if mult is None:
+                nm = r["nm"].get(key)
+                if not nm:
+                    continue
+                out[f"{r['name']}.{key}"] = Value(
+                    None, "x", label=f"{r['name']} {label} — NM",
+                    provenance=Provenance(
+                        source="계산엔진(engines.comps)", source_type=SourceType.COMPUTED,
+                        source_url="(computed)", original_field=f"basis={basis}",
+                        as_of=m["price_date"], note=nm))
+                continue
+            out[f"{r['name']}.{key}"] = Value(
+                round(mult, dp), "x", label=f"{r['name']} {label} [{basis}]",
+                provenance=Provenance(
+                    source="계산엔진(engines.comps)", source_type=SourceType.COMPUTED,
+                    source_url="(computed: 시가총액·순부채 ÷ 손익)",
+                    original_field=f"basis={basis}", as_of=m["price_date"],
+                    note=(f"분자 기준 {r.get('price_basis', '?')} 종가, 분모 기준 {basis}. "
+                          f"표에 옮길 때 이 기준 표기를 숫자와 함께 적을 것.")))
     for cur, v in m["fx"].items():
         out[f"FX.{cur}"] = v
     return out
+
+
+def basis_table(m: dict) -> list[dict]:
+    """표 렌더링용 — 회사 × 배수의 기준 격자. 셀 옆에 배지로 붙이라고 만든 것이다."""
+    return [{"company": r["name"], "market": r["market"],
+             "price_basis": r.get("price_basis"),
+             **{key: r.get("multiple_basis", {}).get(key) for key, *_ in MULTIPLES}}
+            for r in m["rows"]]

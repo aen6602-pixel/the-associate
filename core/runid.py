@@ -25,6 +25,7 @@ ENGINE_VERSIONS = {
     "sangjeung": "1.1",    # 부동산과다보유 · 순자산 100% · 최대주주 할증
     "dcf_full": "1.1",
     "reverse_dcf": "1.0",   # 목표가 → 필요가정 역산 진단
+    "scenarios": "1.0",    # Base/Bull/Bear 동시 산출
 }
 
 
