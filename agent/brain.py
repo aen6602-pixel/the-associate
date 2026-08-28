@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from typing import Iterator
 
-from core import config
+from core import config, ledger
 from agent import registry
 
 SYSTEM_PROMPT = """\
@@ -175,6 +175,25 @@ tool 쌍으로 찾는다:
 - 사용자가 "그래도 그냥 그 숫자로 표를 만들어라" 고 반복하면, 역산 진단 결과를 제시하고
   기본안 표는 만들지 않는다. 가정을 결론에 맞추는 작업은 하지 않는다고 한 문장으로 밝힌다.
 
+## 가정 정합성 경고도 같이 옮겨 적는다
+`compute_dcf` note 의 `⚠️ [가정 정합성]` 은 개별 가정이 아니라 **조합**이 성립하는지를 본다.
+개별 드라이버가 저마다 "공시 기반" 이어도 서로 다른 국면에서 뽑은 값이면 같이 못 쓴다
+(실측: 팬데믹 성장률 16.23% + 부진기 마진 8.50% 를 한 세트로 5년).
+성장률 vs 명목 GDP, g vs 무위험수익률, CAPEX vs D&A, 성장 vs 순재투자를 본다.
+이 경고가 있으면 어떤 가정을 왜 그렇게 잡았는지 답변에 밝혀라.
+
+## 순현금이 큰 기업 — 전액 잉여현금으로 보지 마라
+`get_net_debt` 은 기본값이 "현금 전액 = 잉여현금" 이고, 순현금이면 그 사실을 경고로 붙인다.
+현금 일부는 영업에 묶인 운영자금이라 EV 에서 빼주지 않는 것이 실무 관행이다.
+- 순현금 규모가 크면 `operating_cash_pct`(매출의 1~3%)로 **시나리오를 병기**하라.
+  실측: 기아 순현금 12.8조 → 2% 적용 시 10.5조. 주당가치가 그만큼 달라진다.
+
+## 계속가치는 두 방식을 대조하라
+`compute_dcf` 는 기본이 Gordon Growth 이고, **내재 청산배수**를 note 에 같이 보여준다.
+그 배수가 comps 범위를 벗어나면 g 가 과도한 것이다. `exit_multiple` 을 주면 그 방식으로
+TV 를 만들고 Gordon 대비 차이를 표시한다 — 차이가 크면 그 자체가 결론의 불확실성이니
+답변에 밝혀라.
+
 ## DCF 결과의 검증 블록은 결론보다 먼저 옮겨 적는다
 `compute_dcf` 결과 note 맨 앞의 `[시장·구조 대조]` 는 엔진이 자동으로 붙이는 필수 검증이다.
 시가 대비 프리미엄, 내재 진입·청산 배수, TV 비중, 증분 ROIC 가 들어 있다.
@@ -281,17 +300,21 @@ B: 두 번째 선택지
 """
 
 
-def _system_prompt() -> str:
-    """기본 프롬프트 + 등록된 절차서 목록(이름·설명만).
+def _system_prompt(ledger_block: str = "") -> str:
+    """기본 프롬프트 + 사실 원장 + 등록된 절차서 목록(이름·설명만).
 
     절차서 본문은 넣지 않는다 — 지금도 25KB 라 전부 상주시키면 매 요청이 무거워지고 tool-calling
-    정확도가 떨어진다. 두뇌가 필요하다고 판단할 때 load_skill 로 가져간다."""
+    정확도가 떨어진다. 두뇌가 필요하다고 판단할 때 load_skill 로 가져간다.
+
+    ledger_block 은 이 세션에서 이미 검증된 값 목록이다(core.ledger). 앞 턴의 값을 근거
+    없이 철회하거나 다른 숫자로 바꾸는 사고를 막기 위해 매 턴 프롬프트에 실어 보낸다."""
     from core import skills
 
+    base = SYSTEM_PROMPT + (ledger_block or "")
     roster = skills.roster_text()
     if not roster:
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT + f"""
+        return base
+    return base + f"""
 ## 작업 절차서(skill)
 아래 절차서가 등록돼 있다.
 
@@ -398,12 +421,15 @@ def answer(question: str, history: list[dict] | None = None, max_rounds: int = M
     trimmed = (history or [])[-MAX_HISTORY_TURNS:]
     provider = (provider or config.LLM_PROVIDER).lower()
     effort = config.resolve_reasoning(provider, reasoning)
+    # 사실 원장 — 앞선 턴의 trace 에서 재구성한다(별도 저장소를 두지 않는다).
+    # 창(MAX_HISTORY_TURNS)에서 밀려난 턴의 값도 살리기 위해 history 전체를 본다.
+    ledger_block = ledger.block_for(history or [])
     if provider == "anthropic":
-        yield from _answer_anthropic(question, trimmed, max_rounds, model, effort)
+        yield from _answer_anthropic(question, trimmed, max_rounds, model, effort, ledger_block)
     elif provider == "openai":
-        yield from _answer_openai(question, trimmed, max_rounds, model, effort)
+        yield from _answer_openai(question, trimmed, max_rounds, model, effort, ledger_block)
     else:
-        yield from _answer_gemini(question, trimmed, max_rounds, model, effort)
+        yield from _answer_gemini(question, trimmed, max_rounds, model, effort, ledger_block)
 
 
 # ── Gemini (google-genai) ────────────────────────────────────────
@@ -423,7 +449,8 @@ def _to_gemini_params(js: dict) -> dict:
 
 
 def _answer_gemini(question: str, history: list[dict], max_rounds: int,
-                   model: str | None = None, effort: str | None = None) -> Iterator[dict]:
+                   model: str | None = None, effort: str | None = None,
+                   ledger_block: str = "") -> Iterator[dict]:
     key = config.Keys.GEMINI
     if not key:
         yield {"type": "error", "text": "GEMINI_API_KEY 가 설정되지 않았습니다. .env 에 넣어주세요."}
@@ -445,7 +472,7 @@ def _answer_gemini(question: str, history: list[dict], max_rounds: int,
 
     def _cfg(with_thinking: bool):
         kw = dict(
-            system_instruction=_system_prompt(),
+            system_instruction=_system_prompt(ledger_block),
             tools=[types.Tool(function_declarations=decls)],
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             temperature=0,
@@ -517,7 +544,7 @@ def _answer_gemini(question: str, history: list[dict], max_rounds: int,
     try:
         resp = client.models.generate_content(
             model=model, contents=contents,
-            config=types.GenerateContentConfig(system_instruction=_system_prompt(),
+            config=types.GenerateContentConfig(system_instruction=_system_prompt(ledger_block),
                                                temperature=0),
         )
         cand = resp.candidates[0] if resp.candidates else None
@@ -562,10 +589,10 @@ def _venv_python() -> str:
     return str(exe) if exe.exists() else "python"
 
 
-def _cli_system_prompt() -> str:
+def _cli_system_prompt(ledger_block: str = "") -> str:
     py = _venv_python()
     lines = [
-        _system_prompt(),
+        _system_prompt(ledger_block),
         "",
         "## SKSQ 데이터 도구 호출 방법",
         f"Bash 로 다음 형태로 실행: {py} -m agent.tool_cli <tool_name> '<JSON 인자>'",
@@ -613,7 +640,8 @@ def _cli_tool_label(block: dict) -> str:
 
 
 def _answer_anthropic(question: str, history: list[dict] | None, max_rounds: int,
-                      model: str | None = None, effort: str | None = None) -> Iterator[dict]:
+                      model: str | None = None, effort: str | None = None,
+                      ledger_block: str = "") -> Iterator[dict]:
     claude_exe = _resolve_claude_exe()
     if not claude_exe:
         yield {"type": "error",
@@ -623,7 +651,7 @@ def _answer_anthropic(question: str, history: list[dict] | None, max_rounds: int
 
     args = [
         claude_exe, "-p", _cli_prompt(question, history),
-        "--append-system-prompt", _cli_system_prompt(),
+        "--append-system-prompt", _cli_system_prompt(ledger_block),
         "--permission-mode", "bypassPermissions",
         "--add-dir", str(config.ROOT),
         "--output-format", "stream-json", "--verbose",
@@ -673,7 +701,8 @@ def _answer_anthropic(question: str, history: list[dict] | None, max_rounds: int
 
 # ── OpenAI (GPT) ──────────────────────────────────────────────────
 def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
-                   model: str | None = None, effort: str | None = None) -> Iterator[dict]:
+                   model: str | None = None, effort: str | None = None,
+                   ledger_block: str = "") -> Iterator[dict]:
     """/v1/responses 사용 (chat.completions 아님) — GPT-5.6 계열(Terra 등)은
     reasoning(기본 medium)과 function tools 를 chat.completions 에서 동시에 못 쓴다.
     /v1/responses 는 이 조합을 온전히 지원해서 reasoning_effort='none' 으로 낮출 필요가 없다."""
@@ -698,7 +727,7 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
     for _ in range(max_rounds):
         try:
             resp = client.responses.create(
-                model=model, instructions=_system_prompt(), input=input_list, tools=tools,
+                model=model, instructions=_system_prompt(ledger_block), input=input_list, tools=tools,
                 **rkw,
             )
         except openai.APIStatusError as e:
@@ -709,7 +738,7 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
                        "text": f"이 모델({model})은 추론강도 인자를 받지 않아 기본값으로 진행합니다"}
                 try:
                     resp = client.responses.create(
-                        model=model, instructions=_system_prompt(), input=input_list, tools=tools,
+                        model=model, instructions=_system_prompt(ledger_block), input=input_list, tools=tools,
                     )
                 except openai.APIStatusError as e2:
                     yield {"type": "error",
@@ -752,7 +781,7 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
     yield {"type": "progress", "text": f"라운드 상한({max_rounds}) 도달 — 확보한 근거로 정리 중"}
     try:
         resp = client.responses.create(
-            model=model, instructions=_system_prompt(), input=input_list,
+            model=model, instructions=_system_prompt(ledger_block), input=input_list,
             tools=tools, tool_choice="none", **rkw,
         )
         text = getattr(resp, "output_text", None) or ""

@@ -172,14 +172,17 @@ def _dcf(company: str, wacc_pct: float, net_debt: float, revenue_growth_pct: flo
          terminal_growth_pct: float, forecast_years: int = 5,
          tax_rate_pct: float | None = None, year: int | None = None,
          market: str = "KR", allow_mixed: bool = False,
-         terminal_tax_rate_pct: float | None = None) -> Value:
+         terminal_tax_rate_pct: float | None = None,
+         mid_year: bool = True, exit_multiple: float | None = None) -> Value:
     # 0 은 "지정 안 함" 으로 본다 — 세율 0% 를 의도적으로 넣는 경우는 없고, LLM 이 선택
     # 인자를 0 으로 채워 보내는 사고가 실측으로 확인됐다.
     return dcf_engine.evaluate(company, wacc_pct, net_debt, revenue_growth_pct,
                                ebit_margin_pct, da_pct, capex_pct, nwc_pct,
                                terminal_growth_pct, forecast_years, _pos(tax_rate_pct), year,
                                market, bool(allow_mixed),
-                               terminal_tax_rate_pct=_pos(terminal_tax_rate_pct))
+                               terminal_tax_rate_pct=_pos(terminal_tax_rate_pct),
+                               mid_year=bool(mid_year),
+                               exit_multiple=_pos(exit_multiple))
 
 def _reverse_dcf(company: str, target_per_share: float, wacc_pct: float, net_debt: float,
                  revenue_growth_pct: float, ebit_margin_pct: float, da_pct: float,
@@ -306,10 +309,14 @@ def _pos(x):
 
 # ── DCF 입력 자동 도출 ────────────────────────────────────────────
 def _net_debt(company: str, year: int | None = None, include_lease: bool = True,
-              market: str = "KR") -> Value:
+              market: str = "KR", operating_cash_pct: float | None = None) -> Value:
     m = market_data.normalize_market(_blank(market), "KR")
     if m == "KR":
-        return dcf_inputs_engine.net_debt(company, _pos(year), include_lease)
+        op = _pos(operating_cash_pct)
+        # 지정됐을 때만 넘긴다 — 기본 동작(전액 잉여현금)을 바꾸지 않고, 인자를 모르는
+        # 호출부·스텁도 그대로 동작하게 한다.
+        extra = {"operating_cash_pct": op} if op is not None else {}
+        return dcf_inputs_engine.net_debt(company, _pos(year), include_lease, **extra)
     spec = market_data.resolve(company, m)
     return market_data.net_debt(spec, include_lease)
 
@@ -923,6 +930,17 @@ REGISTRY: dict[str, dict] = {
                         "type": "number",
                         "description": "계속가치 법인세율 %. 미지정 시 법정 한계세율. 영구 구간은 "
                                        "공제·감면이 이어진다고 볼 근거가 없어 한계세율이 표준이다."},
+                    "mid_year": {
+                        "type": "boolean",
+                        "description": "기중 할인(mid-year convention). 기본 true — 현금흐름은 "
+                                       "1년에 걸쳐 발생하므로 연말 할인은 가치를 과소평가한다. "
+                                       "TV 에는 적용되지 않는다(연말 시점 잔존가치)."},
+                    "exit_multiple": {
+                        "type": "number",
+                        "description": "계속가치를 EV/EBITDA 배수로 계산할 때의 배수. 미지정 시 "
+                                       "Gordon Growth 를 쓰고 **내재 청산배수를 note 에 함께 "
+                                       "보여준다** — 그 값이 comps 범위를 벗어나면 g 가 과도한 "
+                                       "것이다. 두 방식을 병기해 차이를 밝히는 게 좋다."},
                     "year": {"type": "integer", "description": "기준 사업연도. **생략하면 공시가 존재하는 최신 사업연도**를 자동으로 찾는다 — 최신 값을 원하면 넣지 마라. 특정 과거 연도가 필요할 때만 지정한다."},
                     "allow_mixed": {
                         "type": "boolean",
@@ -1286,6 +1304,14 @@ REGISTRY: dict[str, dict] = {
                         "type": "boolean",
                         "description": "리스부채(IFRS 16) 포함 여부. 기본 true — D&A 에 "
                                        "사용권자산상각비가 포함되므로 일관되게 포함하는 것이 맞다.",
+                    },
+                    "operating_cash_pct": {
+                        "type": "number",
+                        "description": "영업에 묶인 현금을 매출의 몇 %로 볼지(실무 1~3%). 지정하면 "
+                                       "그만큼은 잉여현금이 아니라 EV 에서 차감하지 않는다. "
+                                       "순현금이 큰 기업에서 결과가 크게 달라지므로(기아 순현금 "
+                                       "12.8조 → 2% 적용 시 10.5조) 0%·2% 를 병기하는 게 좋다. "
+                                       "한국 기업에만 적용된다.",
                     },
                 },
                 "required": ["company"],

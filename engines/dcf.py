@@ -11,12 +11,26 @@ EV = Σ UFCF_t/(1+WACC)^t + TV/(1+WACC)^N,   TV = UFCF_N·(1+g)/(WACC−g)
 from __future__ import annotations
 
 from core import runid
-from engines import reality_check
+from engines import assumption_check, reality_check
 from core.schema import Provenance, Value, DataError, SourceType
 from providers import dart, sec, edinet, finmind, damodaran
 
 # 시장 코드 → provider 모듈. DART만 report/prefer(IS vs CIS 선택)를 추가로 받는다.
 _MARKET_PROVIDERS = {"KR": dart, "US": sec, "JP": edinet, "TW": finmind}
+
+
+class _Empty:
+    """note 가 없는 자리를 안전하게 넘기기 위한 빈 자리표."""
+
+    class provenance:  # noqa: N801
+        note = ""
+
+
+def _years_from_note(note: str | None) -> list[float]:
+    """historical_ratios note 의 '연도 값%' 를 밴드로 뽑는다(추가 조회 없이)."""
+    import re
+
+    return [float(x) for x in re.findall(r"\d{4}\s+([+-]?\d+\.?\d*)%", note or "")]
 
 
 def _assume(desc: str) -> Provenance:
@@ -33,7 +47,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
                 market: str = "KR", allow_mixed: bool = False,
                 terminal_tax_rate_pct: float | None = None,
                 skip_market_check: bool = False,
-                mid_year: bool = True) -> dict:
+                mid_year: bool = True,
+                exit_multiple: float | None = None) -> dict:
     market = (market or "KR").strip().upper()
     provider = _MARKET_PROVIDERS.get(market)
     if provider is None:
@@ -136,10 +151,18 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     _last = rows[-1]
     term_taxr = term_tax / 100.0
     ufcf_n = (_last["ebit"] * (1 - term_taxr) + _last["da"] - _last["capex"] - _last["dnwc"])
-    tv = ufcf_n * (1 + gt) / (wacc - gt)
+    tv_gordon = ufcf_n * (1 + gt) / (wacc - gt)
+    # Gordon 하나만 쓰면 TV 가 g·WACC 에 전적으로 지배된다. exit multiple 방식을 **병기**해
+    # 두 방법이 얼마나 다른지 보여준다 — 차이가 크면 그 자체가 결론의 불확실성이다.
+    ebitda_n = _last["ebit"] + _last["da"]
+    tv_exit = (float(exit_multiple) * ebitda_n) if (exit_multiple and ebitda_n > 0) else None
+    tv = tv_exit if tv_exit is not None else tv_gordon
+    tv_method = "exit multiple" if tv_exit is not None else "Gordon Growth"
     # TV 는 n년차 **말** 시점의 가치라 기중 할인을 적용하지 않는다(현금흐름이 아니라 잔존가치).
     # 여기에 (n-0.5) 를 쓰면 TV 를 반년치만큼 과대평가한다 — 흔한 실수라 명시해 둔다.
     pv_tv = tv / ((1 + wacc) ** n)
+    # 채택하지 않은 방법의 내재값도 함께 남긴다.
+    implied_exit_mult = (tv_gordon / ebitda_n) if ebitda_n > 0 else None
     ev = pv_sum + pv_tv
     equity = ev - float(net_debt)
     per_share = equity / shares
@@ -193,6 +216,34 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     if equity <= 0:
         blocking.append(f"지분가치 음수({equity:,.0f})")
 
+    # ── 가정 정합성 (필수 스텝) ────────────────────────────────────────
+    # 개별 드라이버는 저마다 "공시 기반" 이어도 조합이 성립하지 않을 수 있다(실측: 팬데믹
+    # 구간 성장률 16.23% + 부진기 포함 마진 8.50% 를 한 세트로 5년). 과거 밴드는 이미
+    # 조회하는 historical_ratios 의 note 에서 재사용해 추가 호출을 만들지 않는다.
+    _gh, _mh = [], []
+    if market.upper() == "KR":
+        try:
+            from engines import dcf_inputs
+
+            _h = dcf_inputs.historical_ratios(company, 5, year, "annual", prefer)
+            _gh = _years_from_note((_h.get("revenue_growth_pct") or _Empty()).provenance.note)
+            _mh = _years_from_note((_h.get("ebit_margin_pct") or _Empty()).provenance.note)
+        except Exception:  # noqa: BLE001 — 밴드를 못 구해도 절대 기준 검사는 돌린다
+            pass
+    _rf = None
+    try:
+        from providers import ecos, fred
+
+        _rf = (ecos.risk_free_rate("10Y") if market.upper() == "KR"
+               else fred.risk_free_rate("10Y")).value
+    except Exception:  # noqa: BLE001
+        _rf = None
+    assumptions = assumption_check.check(
+        revenue_growth_pct=(sum(growth) / len(growth)), ebit_margin_pct=float(ebit_margin_pct),
+        da_pct=float(da_pct), capex_pct=float(capex_pct),
+        terminal_growth_pct=float(terminal_growth_pct), wacc_pct=float(wacc_pct),
+        growth_history=_gh, margin_history=_mh, risk_free_pct=_rf, forecast_years=n)
+
     # ── 시장·구조 대조 (필수 스텝) ─────────────────────────────────────
     # 요청이 없어도 붙는다. 예전에는 옵션이라 주당 415,204원을 시가 126,800원과 비교조차
     # 하지 않고 내보냈다(실측). 시가를 못 구해도 구조 검사(TV 비중·증분 ROIC)는 돌린다.
@@ -217,9 +268,12 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
 
     return {
         "company": name, "market": market, "reality": reality, "market_ref": _ref,
+        "assumptions": assumptions,
         "as_of": rev0.provenance.as_of,
         "base_revenue": rev0, "shares": sh, "tax_pct": tax, "tax_prov": tax_prov,
         "mid_year": bool(mid_year),
+        "tv_method": tv_method, "tv_gordon": tv_gordon, "tv_exit": tv_exit,
+        "implied_exit_multiple": implied_exit_mult, "exit_multiple": exit_multiple,
         "terminal_tax_pct": term_tax, "terminal_tax_prov": term_tax_prov,
         "terminal_ufcf": ufcf_n,
         "tv": tv,
@@ -244,11 +298,12 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
              tax_rate_pct: float | None = None, year: int | None = None,
              market: str = "KR", allow_mixed: bool = False,
              terminal_tax_rate_pct: float | None = None,
-             mid_year: bool = True) -> Value:
+             mid_year: bool = True, exit_multiple: float | None = None) -> Value:
     d = build_model(company, wacc_pct, net_debt, revenue_growth, ebit_margin_pct,
                     da_pct, capex_pct, nwc_pct, terminal_growth_pct, forecast_years,
                     tax_rate_pct, year, market=market, allow_mixed=allow_mixed,
-                    terminal_tax_rate_pct=terminal_tax_rate_pct, mid_year=mid_year)
+                    terminal_tax_rate_pct=terminal_tax_rate_pct, mid_year=mid_year,
+                    exit_multiple=exit_multiple)
     # 재현성 각인 — 같은 입력이면 같은 run_id 가 나오므로 재실행이 곧 검증이 된다.
     # (에이전트가 "재현 가능한 compute_dcf 결과가 없어 철회한다" 고 말한 사례 대응)
     run = runid.stamp("dcf", {
@@ -258,7 +313,8 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         "nwc_pct": nwc_pct, "terminal_growth_pct": terminal_growth_pct,
         "forecast_years": forecast_years, "tax_rate_pct": tax_rate_pct,
         "year": year, "allow_mixed": allow_mixed,
-        "terminal_tax_rate_pct": terminal_tax_rate_pct, "mid_year": mid_year})
+        "terminal_tax_rate_pct": terminal_tax_rate_pct, "mid_year": mid_year,
+        "exit_multiple": exit_multiple})
     d["run"] = run
     f = lambda x: f"{x:,.0f}"
     cur = _CURRENCY.get(d["market"], d["market"])
@@ -278,8 +334,10 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
 
     # 검증 블록이 결론보다 먼저 온다 — 경고를 뒤에 두면 사람이 안 읽는다는 지적이 맞다.
     reality_line = reality_check.summary_line(d["reality"], cur)
+    assumption_line = assumption_check.summary(d["assumptions"])
     note = (
         reality_line +
+        assumption_line +
         asof_line +
         f"[DCF · UFCF · ⚠️ 성장·마진 등은 사용자 가정] 기준매출 {f(d['base_revenue'].value)}"
         f"({d['base_revenue'].provenance.source}, {d['as_of']}), "
@@ -288,7 +346,12 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         f"세율 예측기간 {d['tax_pct']}%({d['tax_prov'].source}) · "
         f"계속가치 {d['terminal_tax_pct']}%(한계세율). "
         f"{'기중할인(mid-year)' if d['mid_year'] else '연말할인'}. 예측 {d['forecast_years']}년 → PV(UFCF) {f(d['pv_ufcf_sum'])} + PV(TV) {f(d['pv_tv'])} "
-        f"= EV {f(d['ev'])}. 순부채 {f(d['net_debt'])} 차감 → 지분가치 {f(d['equity_value'])} "
+        f"= EV {f(d['ev'])}. TV 방식 {d['tv_method']}"
+        + (f" (Gordon 이면 내재 청산배수 {d['implied_exit_multiple']:.1f}x)"
+           if d.get('implied_exit_multiple') and d['tv_method'] == 'Gordon Growth' else "")
+        + (f" (Gordon 대비 {d['tv_exit'] / d['tv_gordon'] - 1:+.0%})"
+           if d.get('tv_exit') and d.get('tv_gordon') else "") +
+        f". 순부채 {f(d['net_debt'])} 차감 → 지분가치 {f(d['equity_value'])} "
         f"→ 주당 {f(d['per_share'])}{cur}."
     )
     if d["warnings"]:

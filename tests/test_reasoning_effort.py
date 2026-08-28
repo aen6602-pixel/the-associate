@@ -81,19 +81,21 @@ def test_thinking_error_detection_does_not_swallow_real_failures():
 def test_answer_passes_effort_to_provider(monkeypatch, provider, fn, want):
     seen = {}
 
-    def fake(question, history, max_rounds, model=None, effort=None):
+    def fake(question, history, max_rounds, model=None, effort=None, ledger_block=""):
         seen["effort"] = effort
+        seen["ledger"] = ledger_block
         yield {"type": "final", "text": "ok"}
 
     monkeypatch.setattr(brain, fn, fake)
     list(brain.answer("q", provider=provider, reasoning=want))
     assert seen["effort"] == want
+    assert seen["ledger"] == "", "이력이 없으면 원장 블록도 비어 있어야 한다"
 
 
 def test_answer_normalizes_bad_effort_to_provider_default(monkeypatch):
     seen = {}
 
-    def fake(question, history, max_rounds, model=None, effort=None):
+    def fake(question, history, max_rounds, model=None, effort=None, ledger_block=""):
         seen["effort"] = effort
         yield {"type": "final", "text": "ok"}
 

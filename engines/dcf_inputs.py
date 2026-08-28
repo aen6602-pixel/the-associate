@@ -55,8 +55,15 @@ def _computed(value, unit: str, label: str, note: str, as_of: str | None = None,
 
 
 # ── 순부채 ────────────────────────────────────────────────────────
+# 영업에 묶여 있다고 보는 현금(매출 대비 %). 이만큼은 '잉여현금' 이 아니라 운영자금이라
+# EV 에서 빼주지 않는 것이 실무 관행이다. 0 이면 전액 잉여현금으로 본다(종전 동작).
+# 실측 지적: 기아 연결 순현금 11.17조를 제조업 EV 에 전액 가산했다.
+OPERATING_CASH_PCT_OF_REVENUE = 0.0
+
+
 def net_debt(company: str, year: int | None = None, include_lease: bool = True,
-             report: str = "annual", prefer: str = "CFS") -> Value:
+             report: str = "annual", prefer: str = "CFS",
+             operating_cash_pct: float | None = None) -> Value:
     """순부채 = 이자발생부채(IBD) − 현금및현금성자산.
 
     IBD = 단기차입금(유동성장기부채 포함) + 장기차입금·사채 (+ 리스부채, IFRS 16).
@@ -71,17 +78,35 @@ def net_debt(company: str, year: int | None = None, include_lease: bool = True,
     st, lt = db["short_term"].value, db["long_term"].value
     lease = db["lease"].value if include_lease else 0
     ibd = st + lt + lease
-    nd = ibd - cash.value
+    # 운영현금 차감 — 현금 전액을 잉여현금으로 보면 순현금 기업의 EV 가 과소평가된다.
+    op_cash = 0.0
+    op_pct = (OPERATING_CASH_PCT_OF_REVENUE if operating_cash_pct is None
+              else float(operating_cash_pct))
+    if op_pct > 0:
+        try:
+            rev = dart.financial_item(company, "revenue", year, report, prefer)
+            op_cash = min(cash.value, rev.value * op_pct / 100.0)
+        except DataError:
+            op_cash = 0.0
+    excess_cash = cash.value - op_cash
+    nd = ibd - excess_cash
 
     f = lambda x: f"{x:,.0f}"  # noqa: E731
     lease_txt = f" + 리스부채 {f(lease)}" if include_lease and lease else ""
+    cash_txt = (f"현금및현금성자산 {f(cash.value)}" if not op_cash else
+                f"잉여현금 {f(excess_cash)} (현금 {f(cash.value)} − 운영현금 {f(op_cash)}"
+                f" = 매출의 {op_pct:.1f}%)")
     note = (f"IBD {f(ibd)} (단기 {f(st)} + 장기 {f(lt)}{lease_txt}) "
-            f"− 현금및현금성자산 {f(cash.value)} = 순부채 {f(nd)}"
+            f"− {cash_txt} = 순부채 {f(nd)}"
             f"{' → 순현금 상태' if nd < 0 else ''}"
             + ("" if include_lease else " (리스부채 제외)"))
     # 캡티브 금융 보유사의 연결 IBD 에는 금융부문 조달이 전부 들어 있다. 이 값을 EV 에서
     # 그대로 차감하면 과다차감이 되므로(현대자동차 실측: IBD 131조 중 상당액이 금융부문)
     # 값을 감추지 않고 **오염 사실을 같이 실어 보낸다**.
+    if not op_cash and nd < 0:
+        note += (" ⚠️ 현금 전액을 잉여현금으로 보고 EV 에서 차감했습니다. 일부는 영업에 "
+                 "묶인 운영자금일 수 있으니(실무에서는 매출의 1~3% 를 운영현금으로 보고 "
+                 "제외합니다) operating_cash_pct 로 시나리오를 병기해 보세요.")
     note += _finance_arm_note(company, year, prefer)
     return _computed(nd, "KRW", f"{db['short_term'].label.split(' 단기')[0]} 순부채",
                      note, cash.provenance.as_of,
