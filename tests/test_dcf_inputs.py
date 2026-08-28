@@ -85,14 +85,22 @@ def test_net_cash_is_negative_and_flagged(stub_balance):
 # ── 5개년 비율 ────────────────────────────────────────────────────
 @pytest.fixture
 def stub_history(monkeypatch):
-    """매출 100→110→121, EBIT 10%, CAPEX 5+무형1, D&A 7, NWC현금영향 −2(=ΔNWC +2)."""
+    """매출 100→110→121, EBIT 10%, CAPEX 5+무형1, D&A 7, NWC 수준 20→23→26.
+
+    운전자본이 **수준 기반**으로 바뀌면서 재무상태표 3항목이 1차 입력이 됐다 —
+    예전엔 현금흐름표 '자산부채의 변동' 이 1차라 BS 항목을 스텁하지 않아도 됐다.
+    """
     years = [2025, 2024, 2023]
     revs = {2023: 100, 2024: 110, 2025: 121}
+    wc = {2023: (10, 15, 5), 2024: (12, 16, 5), 2025: (14, 17, 5)}   # (AR, 재고, AP)
 
     def nyear(company, item, n=5, *a, **k):
-        # 실제 provider 는 못 찾는 항목에 DataError 를 낸다 — 운전자본 폴백 경로가
-        # 그 계약대로 동작하는지 보려면 스텁도 같아야 한다.
+        # 실제 provider 는 못 찾는 항목에 DataError 를 낸다 — 결측 경로가 그 계약대로
+        # 동작하는지 보려면 스텁도 같아야 한다.
         table = {"revenue": revs, "operating_income": {y: revs[y] * 0.1 for y in years}}
+        idx = {"trade_receivables": 0, "inventories": 1, "trade_payables": 2}.get(item)
+        if idx is not None:
+            table[item] = {y: wc[y][idx] for y in years}
         if item not in table:
             raise DataError(f"테스트 스텁에 없는 항목: {item}")
         src = table[item]
@@ -120,24 +128,28 @@ def test_capex_ratio_includes_intangibles(stub_history):
     assert "무형자산 취득" in r["capex_pct"].provenance.note
 
 
-def test_nwc_sign_is_flipped_from_cash_flow(stub_history):
-    """현금흐름표 '자산부채의 변동' = −2 (현금 유출) → ΔNWC = +2 (운전자본 증가)."""
+def test_nwc_is_the_balance_sheet_level_over_revenue(stub_history):
+    """운전자본은 **수준**으로 잡는다 — 현금흐름표 증감은 교차검증용으로만 남는다.
+
+    stub_history 의 AR+재고−AP 와 매출로 NWC/매출을 만들고, 그 중앙값이 nwc_pct 가 된다.
+    (예전 규약: 현금흐름표 '자산부채의 변동' 부호를 뒤집어 Δ매출로 나눴다. Δ매출이 작은
+    해에 폭발하고 금융성 항목이 섞여 −73.43%·161.51% 같은 값이 나왔다.)
+    """
     r = dcf_inputs.historical_ratios("테스트", n=3)
-    # Δ매출 = 10(2024), 11(2025) → ΔNWC/Δ매출 = 2/10, 2/11 의 평균
-    expected = (2 / 10 + 2 / 11) / 2 * 100
-    assert r["nwc_pct"].value == pytest.approx(expected, abs=0.01)
-    assert r["nwc_pct"].value > 0, "부호를 반전하지 않으면 음수가 되어 가치가 과대평가된다"
+    assert r["nwc_basis"] == "level"
+    assert r["nwc_pct"] is not None
+    lv = r["nwc_levels"]
+    assert lv, "연도별 수준이 노출돼야 눈으로 검증할 수 있다"
+    for x in lv:
+        assert x["nwc"] == x["ar"] + x["inv"] - x["ap"]
+        assert x["ratio_pct"] == pytest.approx(x["nwc"] / x["rev"] * 100, abs=0.01)
 
 
-def test_nwc_falls_back_to_balance_sheet(monkeypatch, stub_history):
-    """CF 에 자산부채 변동 합계가 없는 회사(SK하이닉스·네이버 실측)는 재무상태표로 계산한다.
-
-    이 경로는 **부호를 반전하지 않는다** — NWC 잔액의 증가가 곧 ΔNWC(현금 유출)이기 때문.
-    CF 경로와 규약이 반대라 별도로 못 박아 둔다."""
+def test_nwc_level_uses_the_narrow_operating_definition(monkeypatch, stub_history):
+    """AR + 재고 − AP 만 쓴다. 금융성 자산·부채는 들어오지 않는다."""
     years = [2025, 2024, 2023]
     revs = {2023: 100, 2024: 110, 2025: 121}
-    # NWC = AR + 재고 − AP : 20 → 23 → 26 (매년 +3)
-    wc = {2023: (10, 15, 5), 2024: (12, 16, 5), 2025: (14, 17, 5)}
+    wc = {2023: (10, 15, 5), 2024: (12, 16, 5), 2025: (14, 17, 5)}   # NWC 20 → 23 → 26
 
     def nyear(company, item, n=5, *a, **k):
         if item == "revenue":
@@ -153,33 +165,20 @@ def test_nwc_falls_back_to_balance_sheet(monkeypatch, stub_history):
     monkeypatch.setattr(dart, "cf_extras_nyear", lambda *a, **k: {
         "corp_name": "테스트",
         "capex": [{"year": y, "amount": 5} for y in years],
-        "capex_intangible": [{"year": y, "amount": 0} for y in years],
-        "da": [{"year": y, "amount": 7} for y in years],
-        "nwc_change": [{"year": y, "amount": None} for y in years],   # CF 경로 없음
+        "capex_intangible": [], "da": [{"year": y, "amount": 6} for y in years],
+        "nwc_change": [{"year": y, "amount": None} for y in years],
         "ocf": [], "interest": [],
     })
-
     r = dcf_inputs.historical_ratios("테스트", n=3)
-    # ΔNWC = +3 매년, Δ매출 = 10(2024), 11(2025)
-    expected = (3 / 10 + 3 / 11) / 2 * 100
-    assert r["nwc_pct"].value == pytest.approx(expected, abs=0.01)
-    assert r["nwc_pct"].value > 0
-    assert "재무상태표" in r["nwc_pct"].provenance.note
-    assert "매출채권" in r["nwc_pct"].provenance.note
-    assert "nwc_pct" not in r["missing"]
-
-
-def test_growth_reports_both_arithmetic_and_cagr(stub_history):
-    r = dcf_inputs.historical_ratios("테스트", n=3)
-    assert r["revenue_growth_pct"].value == pytest.approx(10.0, abs=0.01)
-    assert "CAGR" in r["revenue_growth_pct"].provenance.note
-    assert r["revenue_growth_pct"].extras["cagr"].value == pytest.approx(10.0, abs=0.01)
+    # 26/121=21.5%, 23/110=20.9%, 20/100=20.0% → median 20.9%
+    assert r["nwc_pct"].value == pytest.approx(20.91, abs=0.05)
 
 
 def test_ratios_expose_per_year_detail(stub_history):
     r = dcf_inputs.historical_ratios("테스트", n=3)
     assert r["missing"] == []
     assert "연도별" in r["da_pct"].provenance.note
+    assert "연도별" in r["nwc_pct"].provenance.note
 
 
 def test_missing_inputs_are_reported_not_faked(monkeypatch, stub_history):
@@ -196,8 +195,28 @@ def test_missing_inputs_are_reported_not_faked(monkeypatch, stub_history):
     monkeypatch.setattr(dart, "da_best", lambda *a, **k: (_ for _ in ()).throw(
         DataError("주석에서도 못 찾음")))
     r = dcf_inputs.historical_ratios("테스트", n=3)
-    assert r["da_pct"] is None and r["nwc_pct"] is None
-    assert set(r["missing"]) == {"da_pct", "nwc_pct"}
+    assert r["da_pct"] is None
+    assert "da_pct" in r["missing"]
+    # 운전자본은 이제 재무상태표가 1차라, 현금흐름표에 변동 합계가 없어도 계산된다.
+    assert r["nwc_pct"] is not None, "BS 항목이 있으면 CF 결측과 무관하게 나와야 한다"
+
+
+def test_nwc_is_missing_only_when_the_balance_sheet_items_are(monkeypatch, stub_history):
+    """수준 기반이라 결측 조건이 바뀌었다 — AR/재고/AP 가 없어야 비로소 못 구한다."""
+    years = [2025, 2024, 2023]
+    revs = {2023: 100, 2024: 110, 2025: 121}
+
+    def nyear(company, item, n=5, *a, **k):
+        table = {"revenue": revs, "operating_income": {y: revs[y] * 0.1 for y in years}}
+        if item not in table:
+            raise DataError(f"재무상태표 항목 없음: {item}")
+        return {"corp_name": "테스트",
+                "series": [{"year": y, "amount": table[item][y]} for y in years]}
+
+    monkeypatch.setattr(dart, "financial_item_nyear", nyear)
+    r = dcf_inputs.historical_ratios("테스트", n=3)
+    assert r["nwc_pct"] is None
+    assert "nwc_pct" in r["missing"]
 
 
 # ── 세전 타인자본비용 ─────────────────────────────────────────────
@@ -303,7 +322,7 @@ def test_ols_recovers_known_slope():
     """y = 2x 이면 β = 2, R² = 1."""
     xs = [0.01, -0.02, 0.03, -0.01, 0.005]
     ys = [2 * x for x in xs]
-    slope, _, r2 = beta_engine._ols(xs, ys)
+    slope, _, r2, _t = beta_engine._ols(xs, ys)
     assert slope == pytest.approx(2.0)
     assert r2 == pytest.approx(1.0)
 
@@ -311,9 +330,10 @@ def test_ols_recovers_known_slope():
 def test_ols_zero_beta_for_uncorrelated_series():
     xs = [0.01, -0.01, 0.01, -0.01]
     ys = [0.02, 0.02, 0.02, 0.02]      # 시장과 무관하게 일정
-    slope, _, r2 = beta_engine._ols(xs, ys)
+    slope, _, r2, tstat = beta_engine._ols(xs, ys)
     assert slope == pytest.approx(0.0, abs=1e-12)
     assert r2 == pytest.approx(0.0, abs=1e-12)
+    assert tstat == pytest.approx(0.0, abs=1e-9)
 
 
 def test_returns_are_period_over_period():

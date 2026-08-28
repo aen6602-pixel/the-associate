@@ -32,7 +32,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
                 year: int | None = None, prefer: str = "CFS",
                 market: str = "KR", allow_mixed: bool = False,
                 terminal_tax_rate_pct: float | None = None,
-                skip_market_check: bool = False) -> dict:
+                skip_market_check: bool = False,
+                mid_year: bool = True) -> dict:
     market = (market or "KR").strip().upper()
     provider = _MARKET_PROVIDERS.get(market)
     if provider is None:
@@ -97,7 +98,10 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
         d_a, cap = rev * da, rev * capex
         dnwc = (rev - prev) * nwc
         ufcf = nopat + d_a - cap - dnwc
-        df = 1 / ((1 + wacc) ** t)
+        # 기중 할인(mid-year convention): 현금흐름은 연말에 한 번에 들어오지 않고 1년에 걸쳐
+        # 발생한다. 연말 할인은 그만큼 가치를 낮춘다(표준 관행이고 5% 안팎 차이가 난다).
+        exp = (t - 0.5) if mid_year else t
+        df = 1 / ((1 + wacc) ** exp)
         pv = ufcf * df
         pv_sum += pv
         rows.append({"t": t, "rev": rev, "ebit": ebit, "nopat": nopat, "da": d_a,
@@ -133,6 +137,8 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
     term_taxr = term_tax / 100.0
     ufcf_n = (_last["ebit"] * (1 - term_taxr) + _last["da"] - _last["capex"] - _last["dnwc"])
     tv = ufcf_n * (1 + gt) / (wacc - gt)
+    # TV 는 n년차 **말** 시점의 가치라 기중 할인을 적용하지 않는다(현금흐름이 아니라 잔존가치).
+    # 여기에 (n-0.5) 를 쓰면 TV 를 반년치만큼 과대평가한다 — 흔한 실수라 명시해 둔다.
     pv_tv = tv / ((1 + wacc) ** n)
     ev = pv_sum + pv_tv
     equity = ev - float(net_debt)
@@ -213,6 +219,7 @@ def build_model(company: str, wacc_pct: float, net_debt: float,
         "company": name, "market": market, "reality": reality, "market_ref": _ref,
         "as_of": rev0.provenance.as_of,
         "base_revenue": rev0, "shares": sh, "tax_pct": tax, "tax_prov": tax_prov,
+        "mid_year": bool(mid_year),
         "terminal_tax_pct": term_tax, "terminal_tax_prov": term_tax_prov,
         "terminal_ufcf": ufcf_n,
         "tv": tv,
@@ -236,11 +243,12 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
              terminal_growth_pct: float, forecast_years: int = 5,
              tax_rate_pct: float | None = None, year: int | None = None,
              market: str = "KR", allow_mixed: bool = False,
-             terminal_tax_rate_pct: float | None = None) -> Value:
+             terminal_tax_rate_pct: float | None = None,
+             mid_year: bool = True) -> Value:
     d = build_model(company, wacc_pct, net_debt, revenue_growth, ebit_margin_pct,
                     da_pct, capex_pct, nwc_pct, terminal_growth_pct, forecast_years,
                     tax_rate_pct, year, market=market, allow_mixed=allow_mixed,
-                    terminal_tax_rate_pct=terminal_tax_rate_pct)
+                    terminal_tax_rate_pct=terminal_tax_rate_pct, mid_year=mid_year)
     # 재현성 각인 — 같은 입력이면 같은 run_id 가 나오므로 재실행이 곧 검증이 된다.
     # (에이전트가 "재현 가능한 compute_dcf 결과가 없어 철회한다" 고 말한 사례 대응)
     run = runid.stamp("dcf", {
@@ -250,7 +258,7 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         "nwc_pct": nwc_pct, "terminal_growth_pct": terminal_growth_pct,
         "forecast_years": forecast_years, "tax_rate_pct": tax_rate_pct,
         "year": year, "allow_mixed": allow_mixed,
-        "terminal_tax_rate_pct": terminal_tax_rate_pct})
+        "terminal_tax_rate_pct": terminal_tax_rate_pct, "mid_year": mid_year})
     d["run"] = run
     f = lambda x: f"{x:,.0f}"
     cur = _CURRENCY.get(d["market"], d["market"])
@@ -278,7 +286,8 @@ def evaluate(company: str, wacc_pct: float, net_debt: float, revenue_growth,
         f"유통주식 {d['shares'].value:,}주(자기주식 제외). "
         f"WACC {d['wacc_pct']}%, terminal g {d['terminal_growth_pct']}%, "
         f"세율 예측기간 {d['tax_pct']}%({d['tax_prov'].source}) · "
-        f"계속가치 {d['terminal_tax_pct']}%(한계세율). 예측 {d['forecast_years']}년 → PV(UFCF) {f(d['pv_ufcf_sum'])} + PV(TV) {f(d['pv_tv'])} "
+        f"계속가치 {d['terminal_tax_pct']}%(한계세율). "
+        f"{'기중할인(mid-year)' if d['mid_year'] else '연말할인'}. 예측 {d['forecast_years']}년 → PV(UFCF) {f(d['pv_ufcf_sum'])} + PV(TV) {f(d['pv_tv'])} "
         f"= EV {f(d['ev'])}. 순부채 {f(d['net_debt'])} 차감 → 지분가치 {f(d['equity_value'])} "
         f"→ 주당 {f(d['per_share'])}{cur}."
     )

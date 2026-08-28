@@ -238,31 +238,33 @@ def _ratio_stubs(monkeypatch, *, cf_nwc, revs, wc=None, narrow=False):
                                          "mixed" if narrow else "industrial"})
 
 
-def test_narrow_nwc_is_forced_for_finance_arm_companies(monkeypatch):
-    """현금흐름표 집계에 금융업채권 증감이 섞여 ΔNWC 161.51% 가 나왔다.
+def test_nwc_uses_the_balance_sheet_level_not_cash_flow_deltas(monkeypatch):
+    """운전자본은 **수준(level)** 으로 잡는다.
 
-    금융부문 보유사에는 매출채권+재고−매입채무 의 좁은 정의를 강제한다.
+    예전 1차 경로는 현금흐름표 '자산부채의 변동' 증감이었는데 두 가지가 동시에 잘못됐다:
+    집계에 금융업채권이 섞이고(현대차 161.51%), Δ매출이 작은 해에 분모가 0 에 가까워져
+    비율이 폭발한다(−73.43%). 수준 비율은 분모가 매출이라 그런 일이 없다.
     """
     revs = {2025: 1000.0, 2024: 900.0, 2023: 800.0}
-    cf_nwc = {2025: -1000.0, 2024: -900.0}          # 집계(오염) — 쓰이면 안 된다
-    wc = {2025: 120.0, 2024: 100.0, 2023: 90.0}     # 좁은 정의
+    cf_nwc = {2025: -1000.0, 2024: -900.0}          # 오염된 집계 — 1차로 쓰이면 안 된다
+    wc = {2025: 120.0, 2024: 100.0, 2023: 90.0}     # 좁은 정의(AR+재고−AP)
     _ratio_stubs(monkeypatch, cf_nwc=cf_nwc, revs=revs, wc=wc, narrow=True)
     r = dcf_inputs.historical_ratios("현대자동차", 3)
-    assert r["nwc_narrow"] is True
-    assert "좁은 정의를 강제" in r["nwc_basis"]
-    # 연도별: 2024 (100-90)/(900-800)=10%, 2025 (120-100)/(1000-900)=20% → median 15%
-    assert r["nwc_pct"].value == pytest.approx(15.0)
+    assert r["nwc_basis"] == "level"
+    # 수준 비율: 120/1000=12%, 100/900=11.1%, 90/800=11.25% → median 11.25%
+    assert r["nwc_pct"].value == pytest.approx(11.25, abs=0.01)
     assert r["nwc_pct"].value < 100, "오염된 집계(-1000/100=1000%)가 쓰이면 안 된다"
 
 
-def test_small_revenue_change_years_are_excluded(monkeypatch):
-    """Δ매출이 매출의 2% 미만이면 비율이 폭발한다 → 제외하고 그 사실을 남긴다."""
-    revs = {2025: 1000.0, 2024: 995.0, 2023: 800.0}   # 2025 는 Δ0.5%
+def test_level_ratio_does_not_explode_on_a_flat_revenue_year(monkeypatch):
+    """Δ매출이 0.5% 인 해가 있어도 수준 비율은 멀쩡하다 — 예전엔 여기서 폭발했다."""
+    revs = {2025: 1000.0, 2024: 995.0, 2023: 800.0}
     wc = {2025: 200.0, 2024: 100.0, 2023: 90.0}
     _ratio_stubs(monkeypatch, cf_nwc={}, revs=revs, wc=wc, narrow=True)
     r = dcf_inputs.historical_ratios("테스트", 3)
-    assert any("2025" in s for s in r["nwc_skipped_years"])
-    assert r["nwc_pct"].value == pytest.approx((100 - 90) / (995 - 800) * 100, abs=0.01)
+    # 20.0%, 10.05%, 11.25% → median 11.25%. 증감 방식이면 (200-100)/(1000-995)=2000%.
+    assert r["nwc_pct"].value == pytest.approx(11.25, abs=0.05)
+    assert abs(r["nwc_pct"].value) < 50
 
 
 def test_median_not_mean_so_one_outlier_cannot_dominate(monkeypatch):
@@ -270,31 +272,60 @@ def test_median_not_mean_so_one_outlier_cannot_dominate(monkeypatch):
     wc = {2025: 400.0, 2024: 110.0, 2023: 100.0, 2022: 90.0}   # 2025 가 이상치
     _ratio_stubs(monkeypatch, cf_nwc={}, revs=revs, wc=wc, narrow=True)
     r = dcf_inputs.historical_ratios("테스트", 4)
-    ratios = [(400 - 110) / 100, (110 - 100) / 100, (100 - 90) / 100]
-    assert r["nwc_pct"].value == pytest.approx(sorted(ratios)[1] * 100, abs=0.01)
-    assert "중앙값" in r["nwc_pct"].label
+    # 40.0, 12.2, 12.5, 12.9 → median 12.7 (평균이면 19.4 로 이상치에 끌려간다)
+    assert r["nwc_pct"].value == pytest.approx(12.7, abs=0.2)
+    assert r["nwc_pct"].value < 19.0, "산술평균이면 이상치가 결과를 지배한다"
 
 
 def test_extreme_nwc_raises_confirmation_flag(monkeypatch):
     revs = {2025: 1000.0, 2024: 900.0, 2023: 800.0}
-    wc = {2025: 200.0, 2024: 100.0, 2023: 50.0}        # 100% 수준
+    wc = {2025: 500.0, 2024: 450.0, 2023: 400.0}     # NWC/매출 50%
     _ratio_stubs(monkeypatch, cf_nwc={}, revs=revs, wc=wc, narrow=True)
     r = dcf_inputs.historical_ratios("테스트", 3)
-    assert r["nwc_needs_confirmation"], "30% 초과면 자동 채택 금지 플래그"
-    assert "자동 채택하지 말고" in r["nwc_needs_confirmation"]
+    assert r["nwc_needs_confirmation"], "통상 범위를 넘으면 자동 채택하지 않는다"
+    assert "확인" in r["nwc_pct"].provenance.note
 
 
-def test_normal_company_still_uses_cash_flow_aggregate(monkeypatch):
-    """금융부문이 없으면 기존 경로(현금흐름표 집계)를 그대로 쓴다 — 회귀 방지."""
+def test_unstable_turnover_raises_a_flag(monkeypatch):
+    """회전율이 유지된다는 전제가 이 방식의 근거다 — 편차가 크면 전제가 약하다."""
     revs = {2025: 1000.0, 2024: 900.0, 2023: 800.0}
-    cf_nwc = {2025: -10.0, 2024: -9.0}
-    _ratio_stubs(monkeypatch, cf_nwc=cf_nwc, revs=revs, narrow=False)
-    r = dcf_inputs.historical_ratios("삼성전자", 3)
-    assert r["nwc_narrow"] is False
-    assert "현금흐름표" in r["nwc_basis"]
+    wc = {2025: 50.0, 2024: 200.0, 2023: 60.0}       # 5% ~ 22%
+    _ratio_stubs(monkeypatch, cf_nwc={}, revs=revs, wc=wc, narrow=True)
+    r = dcf_inputs.historical_ratios("테스트", 3)
+    assert r["nwc_needs_confirmation"], "연도별 편차가 크면 확인을 요구해야 한다"
+    assert "편차" in r["nwc_needs_confirmation"]
 
 
-# ── P1-2: 시장 Kd ─────────────────────────────────────────────────────
+def test_turnover_days_are_reported(monkeypatch):
+    """비율보다 회전일수가 실무에서 읽기 쉽고 이상치를 눈으로 잡을 수 있다."""
+    revs = {2025: 1000.0, 2024: 900.0}
+    wc = {2025: 120.0, 2024: 100.0}
+    _ratio_stubs(monkeypatch, cf_nwc={}, revs=revs, wc=wc, narrow=True)
+    r = dcf_inputs.historical_ratios("테스트", 2)
+    note = r["nwc_pct"].provenance.note
+    assert "DSO" in note and "DIO" in note and "DPO" in note
+
+
+def test_cash_flow_method_is_kept_as_a_cross_check(monkeypatch):
+    """증감 방식을 버리지는 않는다 — 교차검증으로 남겨 두 값을 나란히 보여준다."""
+    revs = {2025: 1000.0, 2024: 900.0, 2023: 800.0}
+    cf_nwc = {2025: -11.0, 2024: -10.0}
+    wc = {2025: 120.0, 2024: 100.0, 2023: 90.0}
+    _ratio_stubs(monkeypatch, cf_nwc=cf_nwc, revs=revs, wc=wc, narrow=False)
+    r = dcf_inputs.historical_ratios("테스트", 3)
+    assert "교차검증" in r["nwc_pct"].provenance.note
+
+
+def test_per_year_levels_are_exposed(monkeypatch):
+    revs = {2025: 1000.0, 2024: 900.0}
+    wc = {2025: 120.0, 2024: 100.0}
+    _ratio_stubs(monkeypatch, cf_nwc={}, revs=revs, wc=wc, narrow=True)
+    r = dcf_inputs.historical_ratios("테스트", 2)
+    lv = r["nwc_levels"]
+    assert [x["year"] for x in lv] == [2025, 2024]
+    assert lv[0]["ratio_pct"] == pytest.approx(12.0)
+    assert lv[0]["nwc"] == pytest.approx(120.0)
+
 def test_market_kd_flags_the_risk_free_inversion(monkeypatch):
     """실효 Kd < Rf 는 오류가 아니라 과거 저금리 조달분 때문 — 그 사실을 말해야 한다."""
     from providers import ecos

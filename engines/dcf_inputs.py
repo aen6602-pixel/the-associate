@@ -148,7 +148,10 @@ def _series_map(payload: dict, key: str = "series") -> dict[int, int | None]:
 
 # ΔNWC/Δ매출 안전장치 상수
 NWC_MIN_REV_CHANGE = 0.02   # |Δ매출|/매출 이 2% 미만인 연도는 비율 계산에서 제외
-NWC_SANITY_LIMIT = 30.0     # |ΔNWC/Δ매출| 이 30% 를 넘으면 자동 채택 금지
+NWC_SANITY_LIMIT = 30.0     # |NWC/매출| 이 30% 를 넘으면 자동 채택 금지
+# 연도별 편차 한도(%p). '회전율이 유지된다' 가 이 방식의 전제라, 편차가 수준 자체만큼
+# 크면 전제가 성립하지 않는다 → 절대 10%p 와 중앙값 중 큰 쪽을 한도로 쓴다.
+NWC_SPREAD_LIMIT = 10.0
 
 
 def historical_ratios(company: str, n: int = 5, year: int | None = None,
@@ -245,95 +248,106 @@ def historical_ratios(company: str, n: int = 5, year: int | None = None,
     da_pct = _ratio_of_revenue(das, "D&A/매출(5개년 평균)",
                                "감가상각비+무형자산상각비", da_note_extra)
 
-    # ── ΔNWC / Δ매출 ──────────────────────────────────────────────
-    # 안전장치 3겹: (1) 좁은 정의 강제(금융부문 보유사) (2) Δ매출 분모 하한 (3) 상한 게이트.
-    # 실측 실패(현대자동차): 현금흐름표 '자산부채의 변동' 집계에 금융업채권 증감이 포함돼
-    # ΔNWC/Δ매출 161.51% -> 5개년 UFCF 전부 음수 -> 주당 -5,042,055원.
+    # ── 운전자본 ──────────────────────────────────────────────────
+    # **수준(level) 기반이 1차다.** NWC = 매출채권 + 재고자산 − 매입채무 를 매출 대비
+    # 비율로 잡고, 그 비율이 유지된다는 전제에서 ΔNWC = Δ매출 × (NWC/매출) 로 쓴다.
+    #
+    # 왜 바꿨나 — 예전 1차 경로는 현금흐름표 '자산부채의 변동' 집계의 연도별 증감이었다.
+    # 두 가지가 동시에 잘못됐다:
+    #   (1) 그 집계에는 금융업채권·할부금융자산 증감이 섞인다(현대차 161.51%)
+    #   (2) Δ매출이 작은 해에 분모가 0 에 가까워져 비율이 폭발한다(−73.43% 실측)
+    # 수준 비율은 분모가 매출이라 폭발하지 않고, 좁은 정의라 금융성 항목이 안 들어온다.
+    # 증감 방식은 **교차검증용으로만** 남긴다.
     if narrow_nwc is None:
         try:
             from engines import business_mix
 
             narrow_nwc = not business_mix.classify(company, year, prefer,
                                                    deep=False)["single_dcf_ok"]
-        except Exception:  # noqa: BLE001 — 판정 실패는 계산을 막지 않는다(기존 경로 유지)
+        except Exception:  # noqa: BLE001 — 판정 실패는 계산을 막지 않는다
             narrow_nwc = False
 
-    def _too_small(y: int, prev: int) -> bool:
-        """Δ매출이 매출 대비 너무 작은 연도는 비율이 폭발한다 -> 제외."""
-        return abs(revs[y] - revs[prev]) < abs(revs[y]) * NWC_MIN_REV_CHANGE
+    ar = inv = ap = {}
+    try:
+        ar = _series_map(dart.financial_item_nyear(
+            company, "trade_receivables", n, year, report, prefer))
+        inv = _series_map(dart.financial_item_nyear(
+            company, "inventories", n, year, report, prefer))
+        ap = _series_map(dart.financial_item_nyear(
+            company, "trade_payables", n, year, report, prefer))
+    except DataError:
+        ar = inv = ap = {}
+
+    # 연도별 NWC 수준과 매출 대비 비율
+    levels: list[tuple[int, float, dict]] = []
+    for y in years:
+        if not revs.get(y):
+            continue
+        a, i_, p_ = ar.get(y), inv.get(y), ap.get(y)
+        if a is None or i_ is None or p_ is None:
+            continue
+        nwc_level = a + i_ - p_
+        levels.append((y, nwc_level / revs[y], {"ar": a, "inv": i_, "ap": p_,
+                                                "nwc": nwc_level, "rev": revs[y]}))
 
     nwc_pct = None
-    nwc_pairs: list[tuple[int, float]] = []
-    nwc_skipped: list[str] = []
-    nwc_basis = ""
-
-    if not narrow_nwc:
-        for i in range(1, len(asc)):
-            y, prev = asc[i], asc[i - 1]
-            if nwcs.get(y) is None or not revs.get(y) or not revs.get(prev):
-                continue
-            d_rev = revs[y] - revs[prev]
-            if d_rev == 0:
-                continue
-            if _too_small(y, prev):
-                nwc_skipped.append(f"{y}(Δ매출 {d_rev / revs[y] * 100:+.1f}%)")
-                continue
-            nwc_pairs.append((y, (-nwcs[y]) / d_rev))
-        if nwc_pairs:
-            nwc_basis = ("현금흐름표 '영업활동으로 인한 자산부채의 변동'은 현금영향이라 부호를 "
-                         "반전해 ΔNWC 로 환산")
-
-    # 좁은 정의 경로 — 금융부문 보유사에는 **강제**, 그 외에는 CF 에 집계가 없을 때 폴백.
-    # (SK하이닉스·네이버 실측: CF 에 '자산부채의 변동' 합계 행이 없다)
-    if not nwc_pairs:
-        wc: dict[int, int] = {}
-        try:
-            ar = _series_map(dart.financial_item_nyear(
-                company, "trade_receivables", n, year, report, prefer))
-            inv = _series_map(dart.financial_item_nyear(
-                company, "inventories", n, year, report, prefer))
-            ap = _series_map(dart.financial_item_nyear(
-                company, "trade_payables", n, year, report, prefer))
-            for y in years:
-                if ar.get(y) is None or inv.get(y) is None or ap.get(y) is None:
-                    continue
-                wc[y] = ar[y] + inv[y] - ap[y]
-        except DataError:
-            wc = {}
-        for i in range(1, len(asc)):
-            y, prev = asc[i], asc[i - 1]
-            if y not in wc or prev not in wc or not revs.get(y) or not revs.get(prev):
-                continue
-            d_rev = revs[y] - revs[prev]
-            if d_rev == 0:
-                continue
-            if _too_small(y, prev):
-                nwc_skipped.append(f"{y}(Δ매출 {d_rev / revs[y] * 100:+.1f}%)")
-                continue
-            nwc_pairs.append((y, (wc[y] - wc[prev]) / d_rev))
-        if nwc_pairs:
-            nwc_basis = ("영업 운전자본 = 매출채권 + 재고자산 - 매입채무 의 연도별 증감"
-                         + (" (금융부문 보유사 -> 금융성 자산·부채를 배제한 좁은 정의를 강제)"
-                            if narrow_nwc else
-                            " (현금흐름표에 자산부채 변동 합계가 없어 재무상태표에서 산출)"))
-
     nwc_flag = None
-    if nwc_pairs:
-        # 산술평균은 이상치 하나에 무방비다(3개년이면 특히) -> median.
-        med = median([r for _, r in nwc_pairs]) * 100
+    if levels:
+        ratios = [r for _, r, _ in levels]
+        med = median(ratios) * 100
+        # 회전일수 — 비율보다 실무에서 읽기 쉽고, 이상치를 눈으로 잡을 수 있다.
+        days = []
+        for y, _, d in levels:
+            days.append(f"{y} DSO {d['ar'] / d['rev'] * 365:.0f}일/"
+                        f"DIO {d['inv'] / d['rev'] * 365:.0f}일/"
+                        f"DPO {d['ap'] / d['rev'] * 365:.0f}일")
+        spread = max(ratios) - min(ratios)
+        # 추세가 있으면 중앙값이 '지금 수준' 을 대표하지 못한다. 실측(기아): 1.37% → 6.62%
+        # 로 꾸준히 오르는데 중앙값은 3.38% 라 앞으로의 운전자본 부담을 과소반영한다.
+        # 값을 임의로 최신치로 바꾸지 않고, 둘을 나란히 보여 사용자가 정하게 한다.
+        latest_ratio = levels[0][1] * 100
+        trend_note = ""
+        if abs(latest_ratio - med) > max(3.0, abs(med) * 0.5):
+            trend_note = (f" ⚠️ 최신연도 {latest_ratio:.1f}% 가 중앙값 {med:.1f}% 와 크게 "
+                          f"다릅니다(추세). 중앙값은 과거 평균이라 앞으로의 수준을 "
+                          f"대표하지 못할 수 있으니, 최신치·중앙값 중 무엇으로 정상화할지 "
+                          f"정하세요.")
         if abs(med) > NWC_SANITY_LIMIT:
-            nwc_flag = (f"|ΔNWC/Δ매출| {abs(med):.1f}% 가 통상 범위"
-                        f"({NWC_SANITY_LIMIT:.0f}%)를 넘습니다 — 자동 채택하지 말고 "
-                        f"사용자에게 확인하세요.")
+            nwc_flag = (f"|NWC/매출| {abs(med):.1f}% 가 통상 범위({NWC_SANITY_LIMIT:.0f}%)를 "
+                        f"넘습니다 — 자동 채택하지 말고 사용자에게 확인하세요.")
+        elif spread * 100 > max(NWC_SPREAD_LIMIT, abs(med)):
+            nwc_flag = (f"NWC/매출이 {min(ratios) * 100:.1f}~{max(ratios) * 100:.1f}% 로 "
+                        f"연도별 편차가 큽니다 — 회전율이 안정적이라는 전제가 약하니 "
+                        f"어느 수준으로 정상화할지 확인하세요.")
+
+        # 교차검증: 현금흐름표 증감 방식으로도 계산해 두 값을 나란히 보여준다.
+        cross = []
+        if not narrow_nwc:
+            for i in range(1, len(asc)):
+                y, prev = asc[i], asc[i - 1]
+                if nwcs.get(y) is None or not revs.get(y) or not revs.get(prev):
+                    continue
+                d_rev = revs[y] - revs[prev]
+                if d_rev == 0 or abs(d_rev) < abs(revs[y]) * NWC_MIN_REV_CHANGE:
+                    continue
+                cross.append((-nwcs[y]) / d_rev * 100)
+        cross_note = ""
+        if cross:
+            cm = median(cross)
+            cross_note = (f" 교차검증(현금흐름표 증감 방식) {cm:+.1f}%"
+                          + (" — 수준 방식과 크게 달라 어느 쪽을 쓸지 밝혀야 합니다."
+                             if abs(cm - med) > 15 else " — 두 방식이 정합적입니다."))
+
         nwc_pct = _computed(
             round(med, 2), "%",
-            f"{name} ΔNWC/Δ매출({len(nwc_pairs)}개년 중앙값)",
-            f"{len(nwc_pairs)}개년 중앙값(산술평균은 이상치에 취약해 median 사용). {nwc_basis}. "
-            f"연도별: " + ", ".join(f"{y} {r * 100:+.1f}%" for y, r in nwc_pairs)
-            + (f". 제외된 연도: {', '.join(nwc_skipped)} — Δ매출이 매출의 "
-               f"{NWC_MIN_REV_CHANGE * 100:.0f}% 미만이면 비율이 폭발해 제외"
-               if nwc_skipped else "")
-            + ". 매출 감소 연도가 섞이면 부호가 뒤집힐 수 있으니 연도별 값을 확인할 것."
+            f"{name} NWC/매출({len(levels)}개년 중앙값)",
+            f"영업 운전자본 = 매출채권 + 재고자산 − 매입채무 의 **수준**을 매출로 나눈 값, "
+            f"{len(levels)}개년 중앙값. 회전율이 유지된다는 전제에서 "
+            f"ΔNWC = Δ매출 × {med:.2f}% 로 쓴다. "
+            f"연도별: " + ", ".join(f"{y} {r * 100:.1f}%" for y, r, _ in levels)
+            + ". " + " / ".join(days) + "."
+            + (" 금융부문 보유사 → 금융성 자산·부채를 배제한 좁은 정의." if narrow_nwc else "")
+            + cross_note + trend_note
             + (f" ⚠️ {nwc_flag}" if nwc_flag else ""), as_of)
 
     missing = [k for k, v in (("ebit_margin_pct", ebit_margin), ("revenue_growth_pct", growth),
@@ -344,8 +358,13 @@ def historical_ratios(company: str, n: int = 5, year: int | None = None,
         "ebit_margin_pct": ebit_margin, "revenue_growth_pct": growth,
         "da_pct": da_pct, "capex_pct": capex_pct, "nwc_pct": nwc_pct,
         "missing": missing,
-        "nwc_narrow": bool(narrow_nwc), "nwc_basis": nwc_basis,
-        "nwc_skipped_years": nwc_skipped, "nwc_needs_confirmation": nwc_flag,
+        "nwc_narrow": bool(narrow_nwc),
+        # 수준(level) 방식으로 바뀌면서 '제외된 연도' 개념이 사라졌다 — 분모가 매출이라
+        # 폭발하지 않으므로 연도를 버릴 이유가 없다. 대신 연도별 수준을 그대로 노출한다.
+        "nwc_basis": "level",
+        "nwc_levels": [{"year": y, "ratio_pct": round(r * 100, 2), **d}
+                       for y, r, d in levels],
+        "nwc_needs_confirmation": nwc_flag,
     }
 
 
