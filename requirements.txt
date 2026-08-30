@@ -6,7 +6,7 @@ uvicorn[standard]==0.52.4
 
 # 에이전트 두뇌
 google-genai==2.17.0    # Gemini (무료티어, 로컬 기본)
-openai==2.53.0          # GPT (배포 기본 두뇌)
+openai==2.53.0          # GPT (배포 기본 두뇌). DeepSeek 도 이 패키지 재사용(base_url 만 다른 OpenAI 호환 API)
 anthropic==0.120.2      # Claude (로컬 CLI 경로용, 배포에선 미사용)
 
 # HTTP / 파싱

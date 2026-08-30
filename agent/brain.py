@@ -1,4 +1,4 @@
-"""에이전트 두뇌 — LLM tool-use manual 루프 (Gemini / OpenAI / Anthropic 전환 가능).
+"""에이전트 두뇌 — LLM tool-use manual 루프 (Gemini / OpenAI / Anthropic / DeepSeek 전환 가능).
 
 LLM 은 "어떤 tool 을 어떤 인자로 부를지"만 결정한다. 숫자는 tool(=provider 코드)이 만든다.
 루프의 각 단계를 이벤트로 yield 하여 UI 가 "어떤 API 를 썼는지"를 실시간으로 보여줄 수 있게 한다.
@@ -430,6 +430,8 @@ def answer(question: str, history: list[dict] | None = None, max_rounds: int = M
         yield from _answer_anthropic(question, trimmed, max_rounds, model, effort, ledger_block)
     elif provider == "openai":
         yield from _answer_openai(question, trimmed, max_rounds, model, effort, ledger_block)
+    elif provider == "deepseek":
+        yield from _answer_deepseek(question, trimmed, max_rounds, model, effort, ledger_block)
     else:
         yield from _answer_gemini(question, trimmed, max_rounds, model, effort, ledger_block)
 
@@ -787,6 +789,106 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
             tools=tools, tool_choice="none", **rkw,
         )
         text = getattr(resp, "output_text", None) or ""
+    except Exception as e:  # noqa: BLE001
+        yield {"type": "error",
+               "text": f"라운드 상한({max_rounds}회)에 도달했고 마무리 응답도 실패했습니다: {e}"}
+        return
+    note = _round_limit_note(max_rounds)
+    yield {"type": "final", "text": f"{note}\n\n{text}".strip() if text else note}
+
+
+# ── DeepSeek (openai 패키지 재사용 — base_url 만 다른 OpenAI 호환 API) ──────
+# DeepSeek 는 /v1/responses 가 아니라 구식 chat.completions 만 지원한다. tool 스키마도
+# {"type":"function","function":{...}} 로 한 겹 더 감싸야 한다(OpenAI 의 신형 /v1/responses
+# 는 감싸지 않는 평평한 형태라 registry.tool_schemas() 를 그대로 못 쓴다).
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+
+def _deepseek_tools() -> list[dict]:
+    return [
+        {"type": "function", "function": {
+            "name": t["name"], "description": t["description"],
+            "parameters": t["input_schema"],
+        }}
+        for t in registry.tool_schemas()
+    ]
+
+
+def _deepseek_sampling_kwargs(model: str) -> dict:
+    """deepseek-reasoner(R1) 는 추론을 항상 자체 판단으로 하고 temperature 같은 샘플링
+    파라미터를 받지 않는다(넣으면 오류) — reasoner 계열이면 아예 빼고 부른다. reasoning.effort
+    같은 강도 조절 파라미터 자체가 없으므로(OpenAI 와 달리) effort 인자는 여기서 쓰지 않는다."""
+    if (model or "").lower().startswith("deepseek-reasoner"):
+        return {}
+    return {"temperature": 0}
+
+
+def _answer_deepseek(question: str, history: list[dict] | None, max_rounds: int,
+                     model: str | None = None, effort: str | None = None,
+                     ledger_block: str = "") -> Iterator[dict]:
+    import openai
+
+    key = config.Keys.DEEPSEEK
+    if not key:
+        yield {"type": "error", "text": "DEEPSEEK_API_KEY 가 설정되지 않았습니다. .env 에 넣어주세요."}
+        return
+    model = model or config.DEEPSEEK_MODEL
+    client = openai.OpenAI(api_key=key, base_url=DEEPSEEK_BASE_URL)
+    tools = _deepseek_tools()
+    sampling = _deepseek_sampling_kwargs(model)
+
+    messages: list = [{"role": "system", "content": _system_prompt(ledger_block)}]
+    messages += [{"role": h["role"], "content": h["content"]} for h in (history or []) if h.get("content")]
+    messages.append({"role": "user", "content": question})
+
+    for _ in range(max_rounds):
+        try:
+            resp = client.chat.completions.create(
+                model=model, messages=messages, tools=tools, **sampling,
+            )
+        except openai.APIStatusError as e:
+            yield {"type": "error", "text": f"DeepSeek API 오류 {e.status_code}: {e.message}"}
+            return
+        except openai.APIConnectionError as e:
+            yield {"type": "error", "text": f"네트워크 오류: {e}"}
+            return
+
+        msg = resp.choices[0].message
+        text = msg.content or ""
+        if text:
+            yield {"type": "assistant_text", "text": text}
+
+        calls = msg.tool_calls or []
+        if not calls:
+            yield {"type": "final", "text": text}
+            return
+
+        messages.append({
+            "role": "assistant", "content": msg.content,
+            "tool_calls": [
+                {"id": c.id, "type": "function",
+                 "function": {"name": c.function.name, "arguments": c.function.arguments}}
+                for c in calls
+            ],
+        })
+        for c in calls:
+            try:
+                args = json.loads(c.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            yield {"type": "tool_use", "name": c.function.name, "input": args}
+            result = registry.dispatch(c.function.name, args)
+            yield {"type": "tool_result", "name": c.function.name, "input": args, "result": result}
+            content = (json.dumps(result["value"], ensure_ascii=False)
+                      if result["ok"] else result["error"])
+            messages.append({"role": "tool", "tool_call_id": c.id, "content": content})
+
+    # 상한 도달 — 에러만 내면 그동안 조회한 데이터가 전부 버려진다. tools 를 아예 빼고
+    # 한 번 더 불러 "지금까지 확보한 근거" 로 답을 만들게 한다.
+    yield {"type": "progress", "text": f"라운드 상한({max_rounds}) 도달 — 확보한 근거로 정리 중"}
+    try:
+        resp = client.chat.completions.create(model=model, messages=messages, **sampling)
+        text = resp.choices[0].message.content or ""
     except Exception as e:  # noqa: BLE001
         yield {"type": "error",
                "text": f"라운드 상한({max_rounds}회)에 도달했고 마무리 응답도 실패했습니다: {e}"}

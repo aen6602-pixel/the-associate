@@ -27,6 +27,7 @@ class Keys:
     ANTHROPIC = os.getenv("ANTHROPIC_API_KEY")     # 에이전트 두뇌 (Claude)
     GEMINI = os.getenv("GEMINI_API_KEY")           # 에이전트 두뇌 (Google Gemini, 무료티어)
     OPENAI = os.getenv("OPENAI_API_KEY")           # 에이전트 두뇌 (OpenAI GPT)
+    DEEPSEEK = os.getenv("DEEPSEEK_API_KEY")       # 에이전트 두뇌 (DeepSeek)
     DART = os.getenv("DART_API_KEY")               # 한국 공시/재무 (opendart.fss.or.kr)
     ECOS = os.getenv("ECOS_API_KEY")               # 한국은행 (국고채, 매크로)
     FRED = os.getenv("FRED_API_KEY")               # 미국 무위험이자율/매크로
@@ -82,6 +83,7 @@ REASONING_LABELS = {
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 # provider → (표시명, key_attr, .env 모델변수명, 기본모델, 프리셋 모델 목록)
 # 프리셋은 참고용 후보일 뿐 — UI 에서 자유 텍스트로 다른 모델 ID 도 입력 가능.
@@ -116,6 +118,16 @@ LLM_PROVIDERS: dict[str, dict] = {
         "presets": ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5"],
         "reasoning_levels": ["off", "low", "medium", "high"],
         "default_reasoning": "medium",
+    },
+    "deepseek": {
+        # OpenAI 호환 chat.completions API (base_url 만 다름) — openai 패키지를 그대로 재사용.
+        # deepseek-reasoner(R1) 는 추론을 항상 자동으로 하고 강도를 조절하는 파라미터가 없다
+        # (OpenAI 의 reasoning.effort 같은 노브가 없음) → "모델 자율" 한 단계만 둔다.
+        "label": "DeepSeek", "key_attr": "DEEPSEEK",
+        "env_model_var": "DEEPSEEK_MODEL", "default_model": DEEPSEEK_MODEL,
+        "presets": ["deepseek-chat", "deepseek-reasoner"],
+        "reasoning_levels": ["dynamic"],
+        "default_reasoning": "dynamic",
     },
 }
 

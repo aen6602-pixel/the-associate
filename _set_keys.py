@@ -12,6 +12,7 @@ from pathlib import Path
 FIELDS = [
     ("OPENAI_API_KEY", "OpenAI (두뇌)", "https://platform.openai.com/api-keys"),
     ("ANTHROPIC_API_KEY", "Anthropic Claude (두뇌, 선택)", "https://console.anthropic.com"),
+    ("DEEPSEEK_API_KEY", "DeepSeek (두뇌, 선택)", "https://platform.deepseek.com/api_keys"),
     ("DART_API_KEY", "한국 DART (공시/재무)", "https://opendart.fss.or.kr"),
     ("ECOS_API_KEY", "한국은행 ECOS (국고채/매크로)", "https://ecos.bok.or.kr/api"),
     ("FRED_API_KEY", "미국 FRED (금리/매크로)", "https://fred.stlouisfed.org/docs/api/api_key.html"),
