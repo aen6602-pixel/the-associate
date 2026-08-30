@@ -801,6 +801,12 @@ def _answer_openai(question: str, history: list[dict] | None, max_rounds: int,
 # DeepSeek 는 /v1/responses 가 아니라 구식 chat.completions 만 지원한다. tool 스키마도
 # {"type":"function","function":{...}} 로 한 겹 더 감싸야 한다(OpenAI 의 신형 /v1/responses
 # 는 감싸지 않는 평평한 형태라 registry.tool_schemas() 를 그대로 못 쓴다).
+#
+# 모델 세대(2026-08 확인, DeepSeek 공식 변경 로그): 2026-07-24 부로 구형 ID "deepseek-chat"/
+# "deepseek-reasoner" 는 완전히 폐기되어 호출하면 그냥 오류가 난다(다른 모델로 자동 전환되지
+# 않는다). 후속은 "deepseek-v4-flash"(구 deepseek-chat 대체)/"deepseek-v4-pro"(상위 티어)이고,
+# thinking 모드는 이제 **모델 이름이 아니라 요청 파라미터**로 켠다 — v4 는 thinking 을 켠
+# 채로도 tool-calling 이 된다(구 deepseek-reasoner 는 tool 을 아예 못 썼다).
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 
@@ -814,11 +820,28 @@ def _deepseek_tools() -> list[dict]:
     ]
 
 
-def _deepseek_sampling_kwargs(model: str) -> dict:
-    """deepseek-reasoner(R1) 는 추론을 항상 자체 판단으로 하고 temperature 같은 샘플링
-    파라미터를 받지 않는다(넣으면 오류) — reasoner 계열이면 아예 빼고 부른다. reasoning.effort
-    같은 강도 조절 파라미터 자체가 없으므로(OpenAI 와 달리) effort 인자는 여기서 쓰지 않는다."""
-    if (model or "").lower().startswith("deepseek-reasoner"):
+# effort → DeepSeek reasoning_effort. 문서마다 허용값이 다르게 적혀 있어(low/medium/high/none
+# 라는 문서도, high/max 라는 문서도 있다) 확정하지 않는다 — 값이 거부당하면 thinking 만 켠 채
+# reasoning_effort 없이 재시도한다(_is_thinking_error 가 그 실패를 골라낸다).
+_DEEPSEEK_EFFORT = {"low": "low", "medium": "medium", "high": "high"}
+
+
+def _deepseek_thinking_kwargs(effort: str | None) -> dict:
+    """thinking on/off·reasoning_effort 는 OpenAI 표준 스키마 밖의 DeepSeek 전용 필드라
+    extra_body 로 넘긴다(top-level kwarg 가 아님). effort 가 없거나 'off' 면 thinking 을 끈다."""
+    if not effort or effort == "off":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    thinking: dict = {"thinking": {"type": "enabled"}}
+    level = _DEEPSEEK_EFFORT.get(effort)
+    if level:
+        thinking["reasoning_effort"] = level
+    return {"extra_body": thinking}
+
+
+def _deepseek_sampling_kwargs(effort: str | None) -> dict:
+    """thinking 이 켜지면 temperature 등 샘플링 파라미터를 받지 않는 것으로 확인됐다(구
+    deepseek-reasoner 의 제약이었고 v4 thinking 모드에서도 안전하게 유지) — 꺼져 있을 때만 보낸다."""
+    if effort and effort != "off":
         return {}
     return {"temperature": 0}
 
@@ -835,7 +858,11 @@ def _answer_deepseek(question: str, history: list[dict] | None, max_rounds: int,
     model = model or config.DEEPSEEK_MODEL
     client = openai.OpenAI(api_key=key, base_url=DEEPSEEK_BASE_URL)
     tools = _deepseek_tools()
-    sampling = _deepseek_sampling_kwargs(model)
+    sampling = _deepseek_sampling_kwargs(effort)
+    thinking_kwargs = _deepseek_thinking_kwargs(effort)
+    # thinking_config 허용범위가 모델마다 다를 수 있다(Gemini 와 동일한 우려) — 거부당하면
+    # thinking 지정 없이 한 번 더 시도한다.
+    thinking_dropped = False
 
     messages: list = [{"role": "system", "content": _system_prompt(ledger_block)}]
     messages += [{"role": h["role"], "content": h["content"]} for h in (history or []) if h.get("content")]
@@ -844,11 +871,25 @@ def _answer_deepseek(question: str, history: list[dict] | None, max_rounds: int,
     for _ in range(max_rounds):
         try:
             resp = client.chat.completions.create(
-                model=model, messages=messages, tools=tools, **sampling,
+                model=model, messages=messages, tools=tools, **sampling, **thinking_kwargs,
             )
         except openai.APIStatusError as e:
-            yield {"type": "error", "text": f"DeepSeek API 오류 {e.status_code}: {e.message}"}
-            return
+            if thinking_kwargs and not thinking_dropped and _is_thinking_error(e):
+                thinking_dropped = True
+                thinking_kwargs = {}
+                yield {"type": "progress",
+                       "text": f"이 모델({model})은 추론강도 '{effort}' 설정을 받지 않아 "
+                               f"모델 기본값으로 진행합니다"}
+                try:
+                    resp = client.chat.completions.create(
+                        model=model, messages=messages, tools=tools, **sampling,
+                    )
+                except openai.APIStatusError as e2:
+                    yield {"type": "error", "text": f"DeepSeek API 오류 {e2.status_code}: {e2.message}"}
+                    return
+            else:
+                yield {"type": "error", "text": f"DeepSeek API 오류 {e.status_code}: {e.message}"}
+                return
         except openai.APIConnectionError as e:
             yield {"type": "error", "text": f"네트워크 오류: {e}"}
             return
@@ -863,6 +904,8 @@ def _answer_deepseek(question: str, history: list[dict] | None, max_rounds: int,
             yield {"type": "final", "text": text}
             return
 
+        # msg.reasoning_content(생각 과정)는 여기서 일부러 안 넣는다 — 다음 라운드에
+        # assistant 메시지로 그대로 돌려보내면 DeepSeek 가 오류를 낸다(공식 문서 경고).
         messages.append({
             "role": "assistant", "content": msg.content,
             "tool_calls": [
@@ -887,7 +930,8 @@ def _answer_deepseek(question: str, history: list[dict] | None, max_rounds: int,
     # 한 번 더 불러 "지금까지 확보한 근거" 로 답을 만들게 한다.
     yield {"type": "progress", "text": f"라운드 상한({max_rounds}) 도달 — 확보한 근거로 정리 중"}
     try:
-        resp = client.chat.completions.create(model=model, messages=messages, **sampling)
+        resp = client.chat.completions.create(model=model, messages=messages,
+                                              **sampling, **thinking_kwargs)
         text = resp.choices[0].message.content or ""
     except Exception as e:  # noqa: BLE001
         yield {"type": "error",

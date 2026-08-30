@@ -73,10 +73,32 @@ def test_thinking_error_detection_does_not_swallow_real_failures():
     assert not brain._is_thinking_error(Exception("rate limit exceeded"))
 
 
+def test_deepseek_thinking_toggle_and_effort_go_via_extra_body():
+    # off/미지정 → thinking 자체를 끈다(모델 이름이 아니라 요청 파라미터로 제어).
+    assert brain._deepseek_thinking_kwargs("off") == {
+        "extra_body": {"thinking": {"type": "disabled"}}}
+    assert brain._deepseek_thinking_kwargs(None) == {
+        "extra_body": {"thinking": {"type": "disabled"}}}
+    # 켜져 있으면 reasoning_effort 도 같은 extra_body 안에 실린다(OpenAI 표준 스키마 밖이라
+    # top-level kwarg 가 아님).
+    assert brain._deepseek_thinking_kwargs("high") == {
+        "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}}
+    assert brain._deepseek_thinking_kwargs("low")["extra_body"]["thinking"] == {"type": "enabled"}
+
+
+def test_deepseek_sampling_drops_temperature_only_when_thinking_is_on():
+    # thinking 이 꺼져 있을 때만 temperature 를 보낸다(켜지면 샘플링 파라미터를 거부한다).
+    assert brain._deepseek_sampling_kwargs("off") == {"temperature": 0}
+    assert brain._deepseek_sampling_kwargs(None) == {"temperature": 0}
+    assert brain._deepseek_sampling_kwargs("high") == {}
+    assert brain._deepseek_sampling_kwargs("low") == {}
+
+
 # ── answer() 가 provider 경로로 전달하는지 ─────────────────────────────
 @pytest.mark.parametrize("provider, fn, want", [
     ("openai", "_answer_openai", "high"),
     ("gemini", "_answer_gemini", "dynamic"),
+    ("deepseek", "_answer_deepseek", "high"),
 ])
 def test_answer_passes_effort_to_provider(monkeypatch, provider, fn, want):
     seen = {}

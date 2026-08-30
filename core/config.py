@@ -83,7 +83,9 @@ REASONING_LABELS = {
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+# 2026-07-24 부로 "deepseek-chat"/"deepseek-reasoner" 는 완전히 폐기됐다(DeepSeek 공식
+# 변경로그, 자동 라우팅 없이 그냥 오류). 후속 기본값은 v4-flash.
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 # provider → (표시명, key_attr, .env 모델변수명, 기본모델, 프리셋 모델 목록)
 # 프리셋은 참고용 후보일 뿐 — UI 에서 자유 텍스트로 다른 모델 ID 도 입력 가능.
@@ -121,13 +123,13 @@ LLM_PROVIDERS: dict[str, dict] = {
     },
     "deepseek": {
         # OpenAI 호환 chat.completions API (base_url 만 다름) — openai 패키지를 그대로 재사용.
-        # deepseek-reasoner(R1) 는 추론을 항상 자동으로 하고 강도를 조절하는 파라미터가 없다
-        # (OpenAI 의 reasoning.effort 같은 노브가 없음) → "모델 자율" 한 단계만 둔다.
+        # v4 세대부터 thinking(추론) on/off 와 강도(reasoning_effort)가 요청 파라미터로 들어간다
+        # (모델 이름으로 구분하던 구세대 deepseek-chat/deepseek-reasoner 는 2026-07-24 폐기됨).
         "label": "DeepSeek", "key_attr": "DEEPSEEK",
         "env_model_var": "DEEPSEEK_MODEL", "default_model": DEEPSEEK_MODEL,
-        "presets": ["deepseek-chat", "deepseek-reasoner"],
-        "reasoning_levels": ["dynamic"],
-        "default_reasoning": "dynamic",
+        "presets": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "reasoning_levels": ["off", "low", "medium", "high"],
+        "default_reasoning": "high",
     },
 }
 
