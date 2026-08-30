@@ -10,7 +10,7 @@ from typing import Callable
 
 from core.schema import Value, Provenance, SourceType, DataError
 from core import skills as skills_lib
-from providers import damodaran, fx, ecos, fred, dart, sec, edinet, finmind, openfigi, mops
+from providers import damodaran, fx, ecos, fred, dart, sec, edinet, finmind, openfigi, mops, naver
 from engines import reverse_dcf as reverse_engine
 from engines import scenarios as scenarios_engine
 from engines import (wacc as wacc_engine, sangjeung as sangjeung_engine,
@@ -387,11 +387,26 @@ def _terminal_growth(country: str = "KR", tenor: str = "10Y") -> Value:
 
 
 def _beta(company: str, industry: str | None = None, country: str = "KR",
-          period: str = "week", years: int = 5, market: str | None = None,
+          period: str = "month", years: int = 5, market: str | None = None,
           symbol: str | None = None) -> Value:
+    # KOSPI 로 고정하면 KOSDAQ 종목은 회귀 설명력(R²)이 실제보다 낮게 나온다(실측: 리노공업
+    # KOSPI 대비 R² 0.270 vs KOSDAQ 대비 0.504 — 잘못된 지수로 회귀해 '저신뢰' 경고가 붙었다).
+    # 실제 상장 거래소를 조회해 맞는 지수를 쓰고, 조회 실패 시에만 KOSPI 로 폴백한다.
+    mkt = (market or country or "KR").strip().upper()
+    index = "KOSPI"
+    if mkt == "KR" and not symbol:
+        try:
+            code = dart.resolve(company).get("stock_code")
+            if code:
+                index = naver.exchange_for(code)
+        except Exception:  # noqa: BLE001 — 감지 실패는 폴백일 뿐, 베타 조회 자체를 막지 않는다
+            pass
+    # 기본 period 는 engines.beta 의 PRIMARY_WINDOW(월봉 5년, Damodaran 관례)와 맞춘다 —
+    # 예전엔 여기서 "week" 를 하드코딩해 엔진의 의도된 기본값이 조용히 덮여씌워졌다
+    # (실측: 리노공업 월봉 R² 0.504 vs 주봉 R² 0.288 — 같은 KOSDAQ 지수인데도 차이가 크다).
     return beta_engine.beta_for(company, _blank(industry), country,
-                               _blank(period) or "week", int(_pos(years) or 5),
-                               "KOSPI", _blank(market), _blank(symbol))
+                               _blank(period) or "month", int(_pos(years) or 5),
+                               index, _blank(market), _blank(symbol))
 
 
 def _industry_benchmarks(industry: str, country: str = "KR") -> Value:
@@ -1519,10 +1534,11 @@ REGISTRY: dict[str, dict] = {
         "schema": {
             "name": "get_beta",
             "description": (
-                "레버드 베타를 계산한다. 상장사는 네이버 금융(KRX 시세)의 주가·KOSPI 시계열로 "
-                "OLS 회귀(기본 5년 주봉)해서 구하고, R²(설명력)를 함께 준다 — R² 가 낮으면 "
-                "그 베타는 신뢰도가 낮다는 뜻이다. 비상장사는 industry 를 주면 Damodaran 산업 "
-                "무차입베타를 Hamada 식으로 재레버리지해 구한다. "
+                "레버드 베타를 계산한다. 상장사는 네이버 금융(KRX 시세)의 주가 시계열을 그 "
+                "종목이 실제로 속한 시장지수(KOSPI 또는 KOSDAQ — 자동 판별)와 OLS 회귀"
+                "(기본 5년 월봉)해서 구하고, R²(설명력)를 함께 준다 — R² 가 낮으면 그 베타는 "
+                "신뢰도가 낮다는 뜻이다. 비상장사는 industry 를 주면 Damodaran 산업 무차입베타를 "
+                "Hamada 식으로 재레버리지해 구한다. "
                 "**베타를 사용자에게 묻지 말고 이 도구를 먼저 쓸 것.**"
             ),
             "input_schema": {
@@ -1536,7 +1552,9 @@ REGISTRY: dict[str, dict] = {
                     },
                     "country": {"type": "string", "description": "국가 코드. 기본 KR."},
                     "period": {"type": "string",
-                               "description": "회귀 주기: day | week | month. 기본 week."},
+                               "description": "회귀 주기: day | week | month. 기본 month"
+                                              "(5년 월봉 — Damodaran 관례, 주봉보다 설명력이 "
+                                              "일관되게 높다)."},
                     "years": {"type": "integer", "description": "회귀 기간(년). 기본 5."},
                     "market": {
                         "type": "string",

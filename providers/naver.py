@@ -81,6 +81,26 @@ def market_cap(stock_code: str, name: str | None = None) -> Value:
     return snapshot(stock_code, name)["market_cap"]
 
 
+def exchange_for(stock_code: str) -> str:
+    """종목이 상장된 거래소를 조회한다 → 'KOSPI' | 'KOSDAQ'.
+
+    베타 회귀 시 어느 시장지수와 비교할지를 정하는 데 쓴다. 이걸 확인하지 않고 KOSPI 로
+    고정하면 KOSDAQ 종목은 회귀 설명력(R²)이 실제보다 낮게 나온다(실측 2026-08: 리노공업
+    KOSPI 대비 R² 0.270 < KOSDAQ 대비 R² 0.504 — KOSPI 로 고정하면 '저신뢰' 경고가 잘못 붙는다).
+    """
+    if not (stock_code and stock_code.isdigit() and len(stock_code) == 6):
+        raise DataError(f"유효한 6자리 종목코드가 필요합니다: {stock_code!r}")
+    r = session().get(f"https://m.stock.naver.com/api/stock/{stock_code}/basic",
+                      headers=_UA, timeout=15)
+    r.raise_for_status()
+    j = r.json()
+    name = (j.get("stockExchangeName") or "").strip().upper()
+    if name in ("KOSPI", "KOSDAQ"):
+        return name
+    # exchangeName 이 비어있을 때만 sosok 코드로 폴백(실측: 0=KOSPI, 1=KOSDAQ).
+    return "KOSDAQ" if str(j.get("sosok") or "") == "1" else "KOSPI"
+
+
 # ── 주가/지수 시계열 (베타 회귀용) ─────────────────────────────────
 # 실측 확인(2026-08): 개별종목·지수 모두 일/주/월봉이 2019년부터 조회된다.
 _PERIODS = ("day", "week", "month")

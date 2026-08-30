@@ -407,6 +407,61 @@ def test_acceptable_r2_keeps_the_regression_beta(monkeypatch):
     assert beta_engine.beta_for("SK하이닉스", industry="Semiconductor").value == 1.65
 
 
+# ── get_beta 는 KOSPI 로 고정하지 않고 실제 상장 거래소를 판별해야 한다 ──────────
+# 실측: 리노공업(KOSDAQ)을 KOSPI 와 회귀하면 R² 0.270(저신뢰) < KOSDAQ 대비 0.504.
+def test_get_beta_detects_kosdaq_instead_of_hardcoding_kospi(monkeypatch):
+    from agent import registry
+
+    monkeypatch.setattr(registry.dart, "resolve",
+                        lambda c: {"corp_name": "리노공업", "stock_code": "058470"})
+    monkeypatch.setattr(registry.naver, "exchange_for", lambda code: "KOSDAQ")
+    seen = {}
+
+    def fake_beta_for(company, industry, country, period, years, index, market, symbol):
+        seen["index"] = index
+        return _v(1.0, "배", label="베타")
+
+    monkeypatch.setattr(registry.beta_engine, "beta_for", fake_beta_for)
+    registry._beta("리노공업")
+    assert seen["index"] == "KOSDAQ"
+
+
+def test_get_beta_falls_back_to_kospi_when_exchange_lookup_fails(monkeypatch):
+    from agent import registry
+
+    monkeypatch.setattr(registry.dart, "resolve",
+                        lambda c: {"corp_name": "삼성전자", "stock_code": "005930"})
+    monkeypatch.setattr(registry.naver, "exchange_for",
+                        lambda code: (_ for _ in ()).throw(RuntimeError("네트워크 오류")))
+    seen = {}
+
+    def fake_beta_for(company, industry, country, period, years, index, market, symbol):
+        seen["index"] = index
+        return _v(1.0, "배", label="베타")
+
+    monkeypatch.setattr(registry.beta_engine, "beta_for", fake_beta_for)
+    registry._beta("삼성전자")
+    assert seen["index"] == "KOSPI", "거래소 판별이 실패해도 베타 조회 자체는 막지 않는다"
+
+
+def test_get_beta_skips_exchange_lookup_for_overseas(monkeypatch):
+    from agent import registry
+
+    monkeypatch.setattr(registry.dart, "resolve", lambda c: pytest.fail(
+        "해외 종목(symbol 지정)인데 DART 를 조회했다"))
+    monkeypatch.setattr(registry.naver, "exchange_for", lambda code: pytest.fail(
+        "해외 종목인데 네이버 거래소 조회를 탔다"))
+    seen = {}
+
+    def fake_beta_for(company, industry, country, period, years, index, market, symbol):
+        seen["index"] = index
+        return _v(1.0, "배", label="베타")
+
+    monkeypatch.setattr(registry.beta_engine, "beta_for", fake_beta_for)
+    registry._beta("Apple", country="US", market="US", symbol="AAPL")
+    assert seen["index"] == "KOSPI", "해외 시장에서는 지수 파라미터를 쓰지 않으므로 값이 무의미하다"
+
+
 # ── P1-6: 상증법 법령 판정 ────────────────────────────────────────────
 def _sang_stubs(monkeypatch, *, ni_series, equity, shares, mix):
     from engines import sangjeung
