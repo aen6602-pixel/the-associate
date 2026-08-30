@@ -394,19 +394,27 @@ def _beta(company: str, industry: str | None = None, country: str = "KR",
     # 실제 상장 거래소를 조회해 맞는 지수를 쓰고, 조회 실패 시에만 KOSPI 로 폴백한다.
     mkt = (market or country or "KR").strip().upper()
     index = "KOSPI"
+    exchange_warn = ""
     if mkt == "KR" and not symbol:
         try:
             code = dart.resolve(company).get("stock_code")
             if code:
                 index = naver.exchange_for(code)
-        except Exception:  # noqa: BLE001 — 감지 실패는 폴백일 뿐, 베타 조회 자체를 막지 않는다
-            pass
+        except Exception as e:  # noqa: BLE001 — 감지 실패는 폴백일 뿐, 베타 조회 자체를 막지 않는다
+            # 예전엔 여기서 조용히 넘어갔는데, 그러면 KOSDAQ 종목이 왜 KOSPI 로 회귀됐는지
+            # 알 방법이 없다(실측: Railway 배포에서만 재현, 로컬에선 재현 안 됨 — 원인이
+            # 네트워크·IP 차단인지 코드 문제인지 note 에 이유가 남아야 다음에 알 수 있다).
+            exchange_warn = (f" ⚠️ 상장 거래소 자동판별 실패({type(e).__name__}: {e}) → "
+                             f"KOSPI 로 폴백(실제로는 KOSDAQ 일 수 있음).")
     # 기본 period 는 engines.beta 의 PRIMARY_WINDOW(월봉 5년, Damodaran 관례)와 맞춘다 —
     # 예전엔 여기서 "week" 를 하드코딩해 엔진의 의도된 기본값이 조용히 덮여씌워졌다
     # (실측: 리노공업 월봉 R² 0.504 vs 주봉 R² 0.288 — 같은 KOSDAQ 지수인데도 차이가 크다).
-    return beta_engine.beta_for(company, _blank(industry), country,
-                               _blank(period) or "month", int(_pos(years) or 5),
-                               index, _blank(market), _blank(symbol))
+    v = beta_engine.beta_for(company, _blank(industry), country,
+                             _blank(period) or "month", int(_pos(years) or 5),
+                             index, _blank(market), _blank(symbol))
+    if exchange_warn:
+        v.provenance.note = (v.provenance.note or "") + exchange_warn
+    return v
 
 
 def _industry_benchmarks(industry: str, country: str = "KR") -> Value:

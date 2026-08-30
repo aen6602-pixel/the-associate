@@ -427,6 +427,8 @@ def test_get_beta_detects_kosdaq_instead_of_hardcoding_kospi(monkeypatch):
 
 
 def test_get_beta_falls_back_to_kospi_when_exchange_lookup_fails(monkeypatch):
+    """실패는 조용히 넘어가지 않는다 — note 에 사유가 남아야 다음에 왜 KOSPI 로 폴백했는지
+    (네트워크 문제인지, 코드 버그인지) 배포 환경에서도 재현 없이 알 수 있다."""
     from agent import registry
 
     monkeypatch.setattr(registry.dart, "resolve",
@@ -440,8 +442,10 @@ def test_get_beta_falls_back_to_kospi_when_exchange_lookup_fails(monkeypatch):
         return _v(1.0, "배", label="베타")
 
     monkeypatch.setattr(registry.beta_engine, "beta_for", fake_beta_for)
-    registry._beta("삼성전자")
+    v = registry._beta("삼성전자")
     assert seen["index"] == "KOSPI", "거래소 판별이 실패해도 베타 조회 자체는 막지 않는다"
+    assert "자동판별 실패" in v.provenance.note
+    assert "네트워크 오류" in v.provenance.note
 
 
 def test_get_beta_skips_exchange_lookup_for_overseas(monkeypatch):
