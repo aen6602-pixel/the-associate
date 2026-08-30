@@ -379,7 +379,11 @@ function messageHtml(m, index) {
     ['evaluate_sangjeung_value', 'sangjeung', '📥 상증법 평가 엑셀'],
   ].filter(([tool]) => ran(tool));
 
-  const exports = trace.length ? `<div class="exports">
+  // 이 답변에 아직 답해야 할 decision 블록이 남아있으면(사용자가 선택지를 눌러야
+  // 다음 단계로 넘어가는 중간 확인 단계) 최종 결과가 아니다 — 여기서 엑셀/리포트
+  // 버튼을 보여주면 확정 전 가정으로 내보내게 된다. 결정이 없는(=최종) 답변에만 붙인다.
+  const hasPendingDecision = (m.html || '').includes('class="decision"');
+  const exports = (trace.length && !hasPendingDecision) ? `<div class="exports">
       ${xlsx.map(([, kind, label]) =>
         `<button class="ghost sm" data-export="${kind}" data-index="${index}">${label}</button>`).join('')}
       <button class="ghost sm" data-export="html_report" data-index="${index}">📄 HTML 리포트</button>
