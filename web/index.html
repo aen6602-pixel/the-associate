@@ -21,6 +21,14 @@
 <meta name="apple-mobile-web-app-title" content="Associate">
 <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/styles.css">
+<!-- 저장된 테마를 **첫 페인트 전에** 적용한다. app.js 로 미루면 다크로 한 번 그려진 뒤
+     라이트로 바뀌어 화면이 번쩍인다. -->
+<script>
+  try {
+    var t = localStorage.getItem('assoc-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch (e) { /* 사생활 보호 모드 등에서 localStorage 접근 실패 — 기본(다크)로 둔다 */ }
+</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230A0E17'/><text y='23' x='6' font-size='20' fill='%23F0B429' font-family='sans-serif' font-weight='600'>A</text></svg>">
 </head>
 <body>
@@ -32,6 +40,12 @@
     <div class="byline">Developed by Martin Lee</div>
     <div class="rule"></div>
     <div class="tagline">Every figure, traced to its source.</div>
+    <!-- 실제로 연결된 1차 소스를 이름으로 보여준다 — 이 앱이 무엇에 근거하는지가
+         첫 화면에서 바로 읽히게. -->
+    <div class="splash-srcs">
+      <span>DART</span><span>SEC EDGAR</span><span>EDINET</span><span>한국은행 ECOS</span>
+      <span>FRED</span><span>ECB</span><span>Damodaran</span><span>KRX</span>
+    </div>
     <div class="loading">
       <span class="ln">Opening the desk<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>
       <span class="ln">Connecting to sources<span class="dots"><span>.</span><span>.</span><span>.</span></span></span>
@@ -69,6 +83,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="viewer-row" id="viewer-row" hidden>
       <span class="viewer" id="viewer-label"></span>
+      <button class="ghost sm" id="theme-btn" title="밝게/어둡게">◐</button>
       <a class="ghost sm" id="admin-link" href="/admin" title="관리자 페이지" hidden>Admin</a>
       <button class="ghost sm" id="logout-btn" title="로그아웃">Out</button>
     </div>

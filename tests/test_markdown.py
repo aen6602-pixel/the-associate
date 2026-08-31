@@ -12,8 +12,28 @@ def test_table_renders():
     html = markdown.render("| 항목 | 값 |\n|---|---:|\n| 매출 | 300조 |\n| EBIT | 50조 |")
     assert html.count("<tr>") == 3          # 헤더 1 + 데이터 2
     assert "<th>항목</th>" in html
-    assert "<td>300조</td>" in html
+    assert ">300조</td>" in html            # 수치 열이라 class 가 붙는다(아래 테스트 참고)
     assert 'class="md-table-wrap"' in html  # 좁은 화면에서 가로 스크롤
+
+
+def test_numeric_columns_are_right_aligned_as_a_whole_column():
+    """수치는 자릿수가 세로로 맞아야 크기 비교가 눈으로 된다. 판정은 **열 단위**여서
+    '미확보' 같은 빈칸이 섞여도 그 열의 정렬이 깨지지 않는다."""
+    html = markdown.render(
+        "| 회사 | 시가총액 | 비고 |\n|---|---|---|\n"
+        "| 삼성전자 | 333,600,000 | FY2025 |\n"
+        "| SK하이닉스 | 미확보 | 조회 실패 |")
+    assert '<th class="num">시가총액</th>' in html, "헤더도 본문과 같이 정렬돼야 한다"
+    assert '<td class="num">333,600,000</td>' in html
+    assert '<td class="num">미확보</td>' in html, "같은 열은 빈칸이어도 정렬을 유지한다"
+    assert "<td>삼성전자</td>" in html, "이름 열까지 오른쪽으로 밀면 안 된다"
+    assert "<td>FY2025</td>" in html
+
+
+def test_negative_numbers_are_marked():
+    html = markdown.render("| 항목 | 값 |\n|---|---|\n| 영업이익 | -12,345 |\n| 순부채 | (1,234) |")
+    assert '<td class="num neg">-12,345</td>' in html
+    assert '<td class="num neg">(1,234)</td>' in html, "회계 표기 괄호도 음수다"
 
 
 def test_paragraph_bold_code_and_link():

@@ -25,6 +25,31 @@ _DECISION_LINE = re.compile(r"^\s*([A-Za-z_]+)\s*:\s*(.*)$")
 _OPTION_KEY = re.compile(r"^[A-E]$")
 _TABLE_DIVIDER = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$")
 
+# 표 셀이 '수치'인가 — 자릿수가 맞아떨어져야 비교가 되는 열을 우측정렬·등폭숫자로 만든다.
+# 넓게 잡으면 설명 문장까지 오른쪽으로 밀리므로 **숫자로 시작해 숫자·구분자·단위로만
+# 끝나는** 셀만 본다. (예: "333,600,000", "8.78%", "1.2조원", "(1,234)", "△56", "12.3배")
+_NUM_CELL = re.compile(
+    r"^[(\[]?\s*[-+△▲▼]?\s*\d[\d,\s]*(\.\d+)?\s*"
+    r"(%|%p|bp|배|주|원|달러|엔|위안|조|억|만|천|억원|조원|만원|x|배수|USD|KRW|JPY|TWD|EUR)?\s*[)\]]?$")
+_NEG_CELL = re.compile(r"^\s*[-△▲]|^\s*[(\[]")
+
+
+def _is_num_cell(text: str) -> bool:
+    t = (text or "").strip()
+    return bool(t) and bool(_NUM_CELL.match(t))
+
+
+def _cell_attrs(text: str, numeric_col: bool) -> str:
+    """수치 열에만 class 를 단다. 열 단위로 판정하므로 '미확보'·'NM' 같은 빈칸이 섞여도
+    열 전체 정렬이 흐트러지지 않는다."""
+    if not numeric_col:
+        return ""
+    t = (text or "").strip()
+    cls = "num"
+    if _is_num_cell(t) and _NEG_CELL.match(t):
+        cls += " neg"
+    return f' class="{cls}"'
+
 # escape 된 텍스트 위에서 도는 인라인 규칙 (순서 중요: 코드 먼저 → 그 안은 더 안 건드림)
 _CODE_SPAN = re.compile(r"`([^`]+)`")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
@@ -198,15 +223,31 @@ def render(md: str, *, heading_offset: int = 0) -> str:
         if "|" in stripped and i + 1 < len(lines) and _TABLE_DIVIDER.match(lines[i + 1].strip()):
             close_all()
             head = _cells(stripped)
-            out.append('<div class="md-table-wrap"><table><thead><tr>')
-            out.extend(f"<th>{render_inline(html.escape(c))}</th>" for c in head)
-            out.append("</tr></thead><tbody>")
             i += 2
+            rows: list[list[str]] = []
             while i < len(lines) and "|" in lines[i] and lines[i].strip():
-                out.append("<tr>")
-                out.extend(f"<td>{render_inline(html.escape(c))}</td>" for c in _cells(lines[i]))
-                out.append("</tr>")
+                rows.append(_cells(lines[i]))
                 i += 1
+
+            # 열별로 수치 열인지 먼저 판정한다(본문 셀 과반이 수치면 그 열은 수치 열).
+            # 셀 단위로 정하면 같은 열에서 어떤 칸은 오른쪽, 어떤 칸은 왼쪽이 되어 더 어지럽다.
+            ncols = max([len(head)] + [len(r) for r in rows])
+            numeric = []
+            for c in range(ncols):
+                vals = [r[c] for r in rows if c < len(r) and r[c].strip()]
+                numeric.append(bool(vals) and sum(_is_num_cell(v) for v in vals) * 2 >= len(vals))
+
+            out.append('<div class="md-table-wrap"><table><thead><tr>')
+            out.extend(f"<th{_cell_attrs(c, numeric[n] if n < ncols else False)}>"
+                       f"{render_inline(html.escape(c))}</th>"
+                       for n, c in enumerate(head))
+            out.append("</tr></thead><tbody>")
+            for r in rows:
+                out.append("<tr>")
+                out.extend(f"<td{_cell_attrs(c, numeric[n] if n < ncols else False)}>"
+                           f"{render_inline(html.escape(c))}</td>"
+                           for n, c in enumerate(r))
+                out.append("</tr>")
             out.append("</tbody></table></div>")
             continue
 

@@ -101,6 +101,13 @@ $('login-form').addEventListener('submit', async (e) => {
   }
 });
 
+/* ── 테마 ────────────────────────────────────────────── */
+$('theme-btn').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('assoc-theme', next); } catch (_) { /* 저장 실패해도 전환은 된다 */ }
+});
+
 $('logout-btn').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST' });
   location.reload();
