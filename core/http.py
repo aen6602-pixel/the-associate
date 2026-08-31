@@ -33,6 +33,41 @@ def _content_type(r: "requests.Response") -> str:
     return (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 
 
+# 재시도 — 이 모듈은 오래 전부터 설명문에 '재시도' 를 달고 있었지만 실제 코드는 없었다.
+# 실측(2026-08-31): SEC 전체검색이 500 을 한 번 뱉어 도구 호출이 '데이터 조회 실패' 로
+# 끝났는데, 같은 요청을 바로 다시 보내니 200 이었다. 공개 API 는 이런 순간적 흔들림이
+# 정상 범위이므로 한 번의 blip 이 사용자에게 실패로 보이면 안 된다.
+# 400/403/404 처럼 **우리 요청이 틀린** 경우는 다시 보내도 같은 답이라 즉시 올린다.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_ATTEMPTS = 3
+_BACKOFF_SEC = 0.6
+
+
+def _request(method: str, url: str, **kw):
+    """일시적 실패(연결 끊김·타임아웃·429/5xx)만 지수 백오프로 재시도한다.
+
+    session().request(...) 가 아니라 .get/.post 를 그대로 부른다 — 호출 형태를 바꾸면
+    세션을 감싸거나 대역으로 바꿔 쓰는 쪽이 조용히 깨진다.
+    """
+    last_exc = None
+    last_resp = None
+    call = getattr(session(), method.lower())
+    for attempt in range(_ATTEMPTS):
+        try:
+            r = call(url, **kw)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_exc, last_resp = e, None
+        else:
+            if r.status_code not in _RETRY_STATUSES:
+                return r
+            last_exc, last_resp = None, r
+        if attempt < _ATTEMPTS - 1:
+            time.sleep(_BACKOFF_SEC * (2 ** attempt))
+    if last_resp is not None:
+        return last_resp   # 호출부의 raise_for_status 가 기존과 같은 메시지로 처리한다
+    raise last_exc
+
+
 def _reject_error_page(r: "requests.Response", url: str) -> None:
     """HTTP 200 인데 HTML 을 준 응답을 **캐시에 넣기 전에** 걸러낸다.
 
@@ -75,7 +110,7 @@ def get_bytes(url: str, ttl_hours: float = 24 * 7, headers: dict | None = None,
     cp = _cache_path(full, ".bin")
     if cp.exists() and (time.time() - cp.stat().st_mtime) < ttl_hours * 3600:
         return cp.read_bytes()
-    r = session().get(url, headers=headers, params=params, timeout=timeout)
+    r = _request("GET", url, headers=headers, params=params, timeout=timeout)
     try:
         r.raise_for_status()
     except requests.exceptions.HTTPError as e:
@@ -117,7 +152,7 @@ def get_json(url: str, ttl_hours: float = 6, headers: dict | None = None,
                     pass
             if age < limit * 3600:
                 return cached
-    r = session().get(url, headers=headers, params=params, timeout=timeout)
+    r = _request("GET", url, headers=headers, params=params, timeout=timeout)
     try:
         r.raise_for_status()
     except requests.exceptions.HTTPError as e:
@@ -148,7 +183,7 @@ def post_json(url: str, json_body, ttl_hours: float = 24 * 7, headers: dict | No
     cp = _cache_path(url + "|" + body_key, ".json")
     if cp.exists() and (time.time() - cp.stat().st_mtime) < ttl_hours * 3600:
         return json.loads(cp.read_text(encoding="utf-8"))
-    r = session().post(url, json=json_body, headers=headers, timeout=timeout)
+    r = _request("POST", url, json=json_body, headers=headers, timeout=timeout)
     try:
         r.raise_for_status()
     except requests.exceptions.HTTPError as e:
