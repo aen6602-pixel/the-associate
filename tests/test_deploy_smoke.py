@@ -99,6 +99,35 @@ def test_logout_clears_access(client, gated):
     assert client.get("/api/bootstrap").status_code == 401
 
 
+@pytest.mark.parametrize("quote", ['"', "'", ""])
+def test_quoted_env_values_do_not_lock_everyone_out(monkeypatch, quote):
+    """호스팅 변수 편집기는 적은 문자를 그대로 넘긴다 — .env 관행대로 따옴표를 감싸면
+    아이디가 '\"sanghwa' 가 되고 마지막 비밀번호에 따옴표가 붙어 **아무도 못 들어왔다**
+    (실측). 자기 앱에서 잠기는 실패라 관대하게 받아준다."""
+    from core import auth
+
+    monkeypatch.setenv("APP_USERS", f"{quote}sanghwa:pw-a,team:pw-b{quote}")
+    monkeypatch.setenv("ADMIN_USERS", f"{quote}sanghwa{quote}")
+
+    assert list(auth.users()) == ["sanghwa", "team"]
+    assert auth.admins() == {"sanghwa"}
+    admin = auth.authenticate("sanghwa", "pw-a")
+    assert admin is not None and auth.is_admin(admin)
+    member = auth.authenticate("team", "pw-b")
+    assert member is not None and not auth.is_admin(member)
+    if quote:   # 따옴표 없는 경우엔 'pw-b' 가 곧 정답이라 이 확인이 성립하지 않는다
+        assert auth.authenticate("team", "pw-b" + quote) is None, \
+            "감싼 따옴표를 비밀번호의 일부로 받으면 안 된다"
+
+
+def test_quotes_inside_a_password_are_preserved(monkeypatch):
+    """감싼 따옴표만 벗긴다 — 비밀번호 안의 따옴표까지 지우면 다른 비번이 된다."""
+    from core import auth
+
+    monkeypatch.setenv("APP_USERS", 'sanghwa:pw"mid"pw')
+    assert auth.authenticate("sanghwa", 'pw"mid"pw') is not None
+
+
 def test_shared_password_mode_needs_no_name(client, monkeypatch):
     monkeypatch.delenv("APP_USERS", raising=False)
     monkeypatch.setenv("APP_PASSWORD", "one-for-all")

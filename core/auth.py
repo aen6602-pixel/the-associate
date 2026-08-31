@@ -39,16 +39,31 @@ def _hash(s: str) -> str:
 
 
 # ── 설정 ─────────────────────────────────────────────────────────
+def _env(name: str) -> str:
+    """환경변수를 읽되 **값을 감싼 따옴표를 벗긴다.**
+
+    .env 파일에서는 값을 따옴표로 감싸는 게 관행이고 dotenv 가 알아서 벗겨준다. 그런데
+    호스팅(Railway 등)의 변수 편집기는 적은 문자를 그대로 넘기므로 따옴표가 값에 남는다.
+    실측 사고: APP_USERS="sanghwa:pw,team:pw2" 로 넣자 아이디가 '"sanghwa' 가 되고 마지막
+    비밀번호가 'pw2"' 가 되어 **아무도 로그인할 수 없었다.** 자기 앱에서 잠기는 실패는
+    관대하게 받아주는 편이 맞다.
+    """
+    v = (os.getenv(name) or "").strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1].strip()
+    return v
+
+
 def users() -> dict[str, str]:
     """{이름(소문자): 비밀번호}. APP_USERS 가 우선, 없으면 APP_PASSWORD 공용 1개(이름="")."""
     out: dict[str, str] = {}
-    for pair in (os.getenv("APP_USERS") or "").split(","):
+    for pair in _env("APP_USERS").split(","):
         name, sep, pw = pair.partition(":")
         if sep and name.strip() and pw.strip():
             out[name.strip().lower()] = pw.strip()
     if out:
         return out
-    shared = (os.getenv("APP_PASSWORD") or "").strip()
+    shared = _env("APP_PASSWORD")
     return {"": shared} if shared else {}
 
 
@@ -68,7 +83,7 @@ def admins() -> set[str]:
     """관리자 이름 집합. `ADMIN_USERS` 로 지정하고, 없으면 `APP_USERS` 의 **첫 번째** 계정.
 
     공용 비밀번호(APP_PASSWORD)만 쓰는 설정은 사용자를 구분할 수 없으므로 관리자도 없다."""
-    raw = os.getenv("ADMIN_USERS", "")
+    raw = _env("ADMIN_USERS")
     names = {n.strip().lower() for n in raw.replace(";", ",").split(",") if n.strip()}
     if names:
         return names
@@ -99,12 +114,12 @@ _FALLBACK_SECRET = secrets.token_hex(32)  # SESSION_SECRET 미설정 시 프로�
 
 
 def _secret() -> bytes:
-    return (os.getenv("SESSION_SECRET") or _FALLBACK_SECRET).encode("utf-8")
+    return (_env("SESSION_SECRET") or _FALLBACK_SECRET).encode("utf-8")
 
 
 def secret_is_ephemeral() -> bool:
     """SESSION_SECRET 이 없어 재시작 시 전원 로그아웃되는 상태인지 (기동 로그 경고용)."""
-    return not (os.getenv("SESSION_SECRET") or "").strip()
+    return not _env("SESSION_SECRET")
 
 
 # ── 비밀번호 검증 ────────────────────────────────────────────────
