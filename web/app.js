@@ -275,6 +275,21 @@ function renderSources(srcs, roadmap) {
   }
   html += '</div>';
   $('source-groups').innerHTML = html;
+  wireAccordion();
+}
+
+/* 소스 목록은 항목이 20개가 넘어서, 열어본 것이 전부 펼쳐진 채 남으면 사이드바가 금방
+ * 길어지고 원하는 항목을 다시 찾기 어려워진다. 한 번에 하나만 열리게 한다. */
+function wireAccordion() {
+  const items = [...document.querySelectorAll('#source-groups details.src')];
+  for (const d of items) {
+    d.addEventListener('toggle', () => {
+      if (!d.open) return;
+      for (const other of items) {
+        if (other !== d) other.open = false;
+      }
+    });
+  }
 }
 
 /* ── 소스 실측 점검 ───────────────────────────────────────
@@ -304,8 +319,9 @@ function applyHealth(snap) {
         ? `${r.detail} · 응답 ${r.ms}ms`
         : r.detail;
     }
-    // 죽은 소스는 접혀 있으면 눈에 안 띈다 — 펼쳐서 사유가 바로 보이게 한다.
-    if (r.state === 'down') el.open = true;
+    // 죽은 소스를 펼쳐두지는 않는다 — 아코디언(한 번에 하나)과 충돌해서 여러 개가
+    // 죽으면 마지막 하나만 남고, 무엇보다 사이드바가 열린 채로 길어진다.
+    // 어느 소스가 죽었는지는 아래 요약 바가 이름으로 알려주고, 배지가 ❌ 로 바뀐다.
   }
 
   const down = snap.down || [];
@@ -857,6 +873,17 @@ if ('serviceWorker' in navigator) {
         });
       })
       .catch(() => { /* 등록 실패는 앱 동작에 영향 없음 — 조용히 넘긴다 */ });
+
+    // 새 서비스워커가 제어를 넘겨받으면 한 번만 새로고침한다.
+    // 이게 없으면 배포 직후 첫 접속이 '새 HTML + 옛 JS' 로 뜬다 — 이번 페이지의 자산은
+    // 이미 옛 워커가 응답한 뒤이기 때문이다(실측: '사용 방법' 버튼이 눌리지 않던 원인).
+    // reloaded 플래그로 무한 새로고침을 막는다.
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloaded) return;
+      reloaded = true;
+      location.reload();
+    });
   });
 }
 

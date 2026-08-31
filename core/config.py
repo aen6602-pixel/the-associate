@@ -41,7 +41,7 @@ SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "sksq-agent sanghwalee@sksquare.com
 
 # ── 에이전트 두뇌(LLM) 선택 ────────────────────────────────────────
 # LLM 은 "어떤 tool 을 부를지"만 정한다. UI(사이드바)에서 실행 중에도 전환 가능.
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").lower()
 
 # ── 배포 모드 ──────────────────────────────────────────────────────
 # 배포 모드가 하는 일: claude CLI 두뇌 숨김 + **인증이 없으면 앱을 열지 않음**(fail-closed).
@@ -129,7 +129,7 @@ LLM_PROVIDERS: dict[str, dict] = {
         "env_model_var": "DEEPSEEK_MODEL", "default_model": DEEPSEEK_MODEL,
         "presets": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "reasoning_levels": ["off", "low", "medium", "high"],
-        "default_reasoning": "high",
+        "default_reasoning": "medium",
     },
 }
 

@@ -46,7 +46,7 @@ Railway → 서비스 → **Variables** → *Raw Editor* 에 붙여넣고 값 �
 
 ```env
 DEPLOY_MODE=1          # 사실 Railway 에선 자동 감지되지만, 명시해 두는 편이 안전하다
-LLM_PROVIDER=openai
+LLM_PROVIDER=deepseek
 DATA_DIR=/data
 
 # 로그인 — 이걸 안 넣으면 앱이 열리지 않는다(의도된 fail-closed)
@@ -56,8 +56,8 @@ ADMIN_USERS=sanghwa
 # 쿠키 서명 키 — 없으면 재시작마다 전원 로그아웃
 SESSION_SECRET=<python -c "import secrets; print(secrets.token_hex(32))" 결과>
 
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5.6-terra
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_MODEL=deepseek-v4-flash
 
 DART_API_KEY=...
 ECOS_API_KEY=...

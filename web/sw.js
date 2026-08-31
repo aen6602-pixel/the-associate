@@ -5,13 +5,19 @@
  *
  * 그래서 역할을 최소로 자른다:
  *   1) 설치 가능하게 만든다 (Chrome 은 fetch 핸들러가 있는 SW 를 요구한다)
- *   2) 정적 자산(css/js/아이콘)만 stale-while-revalidate 로 빠르게 띄운다
+ *   2) 정적 자산(css/js/아이콘)은 **네트워크 우선**, 끊겼을 때만 캐시로 대체
  *   3) API·HTML·엑셀 다운로드는 **절대 캐시하지 않는다** (network-only)
  *   4) 네트워크가 끊긴 화면 진입에만 안내 페이지를 준다
  *
- * 캐시 이름에 버전을 박아 배포할 때마다 통째로 교체한다.
+ * ⚠️ 2번이 예전에는 stale-while-revalidate 였고, 그게 배포를 조용히 망가뜨렸다(실측
+ * 2026-08-31): index.html 은 navigation 이라 항상 새로 받는데 app.js 는 캐시에서 나와,
+ * **배포 직후 첫 접속에서 새 HTML + 옛 JS** 가 조합됐다. 새로 넣은 '사용 방법' 버튼이
+ * 화면에는 보이는데 눌러도 아무 일이 없었던 이유다(핸들러가 옛 JS 에 없으므로).
+ * 두 번째 새로고침에서야 고쳐지니 원인을 찾기도 어렵다.
+ * 이 앱은 공시 API 를 실시간 조회해야 하므로 어차피 오프라인에서 쓸 수 없다 —
+ * 정적 파일 몇 개를 캐시에서 먼저 꺼내 얻는 속도보다, 배포한 코드가 그대로 도는 것이 훨씬 중요하다.
  */
-const VERSION = 'assoc-v1';
+const VERSION = 'assoc-v2';
 const STATIC_CACHE = `${VERSION}-static`;
 
 /* 앱 껍데기. 여기에 HTML 을 넣지 않는 것이 중요하다 — index.html 은 인증 상태에 따라
@@ -87,18 +93,18 @@ self.addEventListener('fetch', (event) => {
    * 이 앱에서는 곧 오답이다. */
   if (url.pathname.startsWith('/api/') || url.pathname === '/healthz') return;
 
-  /* 정적 자산: 캐시 우선 + 뒤에서 갱신(stale-while-revalidate) */
+  /* 정적 자산: 네트워크 우선, 실패했을 때만 캐시.
+   * 캐시를 먼저 주면 배포한 JS/CSS 가 즉시 반영되지 않는다(위 헤더 주석 참고). */
   if (isStaticAsset(url)) {
     event.respondWith((async () => {
       const cache = await caches.open(STATIC_CACHE);
-      const hit = await cache.match(request);
-      const fetching = fetch(request)
-        .then((res) => {
-          if (res && res.ok) cache.put(request, res.clone());
-          return res;
-        })
-        .catch(() => null);
-      return hit || (await fetching) || new Response('', { status: 504 });
+      try {
+        const res = await fetch(request);
+        if (res && res.ok) cache.put(request, res.clone());   // 오프라인 대비로만 보관
+        return res;
+      } catch (_) {
+        return (await cache.match(request)) || new Response('', { status: 504 });
+      }
     })());
     return;
   }
