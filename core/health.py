@@ -15,11 +15,14 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from core import config, sources
 from core.cache import ttl_cache
+
+log = logging.getLogger("associate")
 
 # 소스 카탈로그의 name → 그 소스의 ping(). sources.SOURCES 와 이름으로 맞춘다.
 _PROBES: dict = {}
@@ -100,6 +103,12 @@ def check_all() -> list[dict]:
 
     order = list(probes)
     out.sort(key=lambda r: order.index(r["name"]) if r["name"] in order else 99)
+
+    # 실패는 서버 로그에도 남긴다 — 사이드바 문구는 그 순간 화면을 본 사람만 보고,
+    # 배포 환경에서만 나는 실패는 나중에 로그로 되짚는 수밖에 없다.
+    for r in out:
+        if r["state"] == "down":
+            log.warning("source down: %s (%dms) %s", r["name"], r["ms"], r["detail"])
     return out
 
 

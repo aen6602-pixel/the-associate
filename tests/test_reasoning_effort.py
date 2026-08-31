@@ -73,6 +73,30 @@ def test_thinking_error_detection_does_not_swallow_real_failures():
     assert not brain._is_thinking_error(Exception("rate limit exceeded"))
 
 
+def test_retired_deepseek_ids_are_migrated_not_called():
+    """deepseek-chat / deepseek-reasoner 는 2026-07-24 폐기됐고, 부르면 다른 모델로
+    자동 대체되는 게 아니라 그냥 오류가 난다. 배포 환경변수에 옛 값이 남아 있던 사고가
+    실제로 있어서(폐기 전에 적어둔 설정이 그대로 살아남음) 부르기 전에 옮긴다."""
+    assert config.migrate_model("deepseek-chat") == "deepseek-v4-flash"
+    assert config.migrate_model("deepseek-reasoner") == "deepseek-v4-flash"
+    assert config.migrate_model("DeepSeek-Chat") == "deepseek-v4-flash", "대소문자 무관"
+    assert config.resolve_llm("deepseek", "deepseek-chat")["model"] == "deepseek-v4-flash"
+
+
+def test_migration_does_not_block_unknown_or_future_models():
+    """모르는 이름을 막으면 새로 나온 모델을 직접 입력할 길이 사라진다."""
+    assert config.migrate_model("deepseek-v4-pro") == "deepseek-v4-pro"
+    assert config.migrate_model("some-future-model") == "some-future-model"
+    assert config.migrate_model(None) is None
+
+
+def test_deepseek_default_model_is_a_live_preset():
+    p = config.LLM_PROVIDERS["deepseek"]
+    assert p["default_model"] in p["presets"], \
+        "기본값이 presets 에 없으면 UI 가 '직접 입력…' 으로 떨어진다"
+    assert p["default_model"] not in config.RETIRED_MODELS
+
+
 def test_deepseek_thinking_toggle_and_effort_go_via_extra_body():
     # off/미지정 → thinking 자체를 끈다(모델 이름이 아니라 요청 파라미터로 제어).
     assert brain._deepseek_thinking_kwargs("off") == {

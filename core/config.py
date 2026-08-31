@@ -87,8 +87,24 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
 # 2026-07-24 부로 "deepseek-chat"/"deepseek-reasoner" 는 완전히 폐기됐다(DeepSeek 공식
-# 변경로그, 자동 라우팅 없이 그냥 오류). 후속 기본값은 v4-flash.
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+# 변경로그). 이름을 그대로 부르면 **다른 모델로 자동 대체되지 않고 그냥 오류**가 난다.
+# 배포 환경변수나 사용자가 직접 입력한 값에 구형 ID 가 남아 있는 일이 실제로 있어서
+# (폐기 전에 적어둔 설정이 그대로 산다), 부르기 전에 후속 모델로 옮긴다.
+RETIRED_MODELS = {
+    "deepseek-chat": "deepseek-v4-flash",        # 비추론 → v4-flash
+    "deepseek-reasoner": "deepseek-v4-flash",    # 추론 → v4-flash + thinking 파라미터
+}
+
+
+def migrate_model(model: str | None) -> str | None:
+    """폐기된 모델 ID 를 후속으로 바꾼다. 모르는 이름은 그대로 둔다 —
+    사용자가 새로 나온 모델을 직접 입력하는 길을 막으면 안 된다."""
+    if not model:
+        return model
+    return RETIRED_MODELS.get(model.strip().lower(), model)
+
+
+DEEPSEEK_MODEL = migrate_model(os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
 
 # provider → (표시명, key_attr, .env 모델변수명, 기본모델, 프리셋 모델 목록)
 # 프리셋은 참고용 후보일 뿐 — UI 에서 자유 텍스트로 다른 모델 ID 도 입력 가능.
@@ -179,7 +195,8 @@ def resolve_llm(provider: str, model: str | None = None,
     common = {
         "provider": resolved,
         "label": p["label"],
-        "model": model or p["default_model"],
+        # 직접 입력란으로 폐기된 ID 가 들어와도 여기서 걸러진다.
+        "model": migrate_model(model) or p["default_model"],
         "presets": p["presets"],
         "reasoning_levels": p.get("reasoning_levels", []),
         "default_reasoning": default_reasoning(resolved),
