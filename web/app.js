@@ -390,29 +390,50 @@ function traceItemHtml(t) {
     ${extras}</div>`;
 }
 
+// 엑셀 종류 → 그 파일을 만들 수 있는 계산 도구. 계산하지 않은 방법의 버튼을 띄우면
+// 눌러도 400 이 나므로, 실제로 성공한 도구에 대응하는 것만 제안한다.
+const EXPORT_KINDS = [
+  ['compute_dcf', 'dcf_full', '📥 DCF 전체 모델 (5시트)'],
+  ['compute_dcf', 'dcf', '📥 DCF 요약 (1시트)'],
+  ['compute_comps', 'comps', '📥 Comps 엑셀'],
+  ['evaluate_sangjeung_value', 'sangjeung', '📥 상증법 평가 엑셀'],
+];
+
+/* 이 답변까지 거슬러 올라가며 그 도구가 **성공한** 가장 최근 메시지를 찾는다.
+   여러 번 돌렸으면 마지막 것 — 사용자가 마지막에 확정한 가정이 담긴 실행이다. */
+function lastRunIndex(upto, tool) {
+  for (let i = upto; i >= 0; i--) {
+    const m = state.messages[i];
+    if (m && m.role === 'assistant'
+        && (m.trace || []).some((t) => t.name === tool && (t.result || {}).ok)) return i;
+  }
+  return -1;
+}
+
 function messageHtml(m, index) {
   if (m.role === 'user') {
     return `<div class="msg user"><div class="avatar">You</div>
       <div class="body">${esc(m.content)}</div></div>`;
   }
   const trace = m.trace || [];
-  // 그 답변에서 실제로 성공한 계산 도구에 대응하는 엑셀만 제안한다 —
-  // 계산하지 않은 방법의 버튼을 띄우면 눌러도 400 이 나서 혼란만 준다.
-  const ran = (tool) => trace.some((t) => t.name === tool && (t.result || {}).ok);
-  const xlsx = [
-    ['compute_dcf', 'dcf_full', '📥 DCF 전체 모델 (5시트)'],
-    ['compute_dcf', 'dcf', '📥 DCF 요약 (1시트)'],
-    ['compute_comps', 'comps', '📥 Comps 엑셀'],
-    ['evaluate_sangjeung_value', 'sangjeung', '📥 상증법 평가 엑셀'],
-  ].filter(([tool]) => ran(tool));
 
-  // 이 답변에 아직 답해야 할 decision 블록이 남아있으면(사용자가 선택지를 눌러야
-  // 다음 단계로 넘어가는 중간 확인 단계) 최종 결과가 아니다 — 여기서 엑셀/리포트
-  // 버튼을 보여주면 확정 전 가정으로 내보내게 된다. 결정이 없는(=최종) 답변에만 붙인다.
+  // 엑셀은 **그 계산이 실제로 수행된 메시지**에서 뽑는다(서버가 그 인덱스의 trace 를 읽는다).
+  // 결론 답변은 대개 도구를 다시 부르지 않아 자기 trace 가 비어 있다 — 예전에는 자기
+  // trace 만 보느라, DCF 를 돌린 턴은 결정 카드 때문에 버튼이 숨겨지고 마지막 정리 턴은
+  // trace 가 없어서, **끝나도 버튼이 영영 안 나왔다.**
+  const xlsx = EXPORT_KINDS
+    .map(([tool, kind, label]) => [lastRunIndex(index, tool), kind, label])
+    .filter(([at]) => at >= 0);
+
+  // 아직 답해야 할 decision 블록이 남아 있으면 중간 단계다 — 확정 전 가정으로 내보내지
+  // 않도록 그 답변에는 붙이지 않는다.
   const hasPendingDecision = (m.html || '').includes('class="decision"');
-  const exports = (trace.length && !hasPendingDecision) ? `<div class="exports">
-      ${xlsx.map(([, kind, label]) =>
-        `<button class="ghost sm" data-export="${kind}" data-index="${index}">${label}</button>`).join('')}
+  const isLast = index === state.messages.length - 1;
+  // 자기 trace 가 있으면(그 턴의 산출물) 그 자리에, 없어도 마지막 답변이면 결론이므로 붙인다.
+  const show = !hasPendingDecision && (trace.length || (isLast && xlsx.length));
+  const exports = show ? `<div class="exports">
+      ${xlsx.map(([at, kind, label]) =>
+        `<button class="ghost sm" data-export="${kind}" data-index="${at}">${label}</button>`).join('')}
       <button class="ghost sm" data-export="html_report" data-index="${index}">📄 HTML 리포트</button>
       <button class="ghost sm" data-copy="answer" data-index="${index}">📋 답변 복사</button>
     </div>` : '';
