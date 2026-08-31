@@ -32,7 +32,11 @@ from core.schema import Provenance, Value, DataError, SourceType
 from core.http import get_bytes, get_json
 from core import config
 
-_BASE = "https://disclosure.edinet-fsa.go.jp/api/v2"
+# ⚠️ API 호스트는 **api.edinet-fsa.go.jp** 다. disclosure.edinet-fsa.go.jp/api/v2 는 죽었고,
+# 404 를 주는 게 아니라 **HTTP 200 + HTML 에러페이지**("規定外操作が行われました")를 준다
+# (실측 2026-08-31: documents.json·documents/{docID} 양쪽 모두). 그래서 호출부는 엉뚱하게
+# JSONDecodeError / BadZipFile 로 터졌다. core.http 가 이제 이 패턴을 이름 붙여 막는다.
+_BASE = "https://api.edinet-fsa.go.jp/api/v2"
 _CODELIST_URL = "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/codelist/Edinetcode.zip"
 
 _ANNUAL_REPORT_DOC_TYPE = "120"  # 有価証券報告書
@@ -89,6 +93,23 @@ def _norm_en(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
+# Yahoo 등에서 쓰는 거래소 접미사. '285A.T' 처럼 들어오면 떼고 코드로 본다.
+_TICKER_SUFFIX_RE = re.compile(r"\.(t|to|tyo|jp|jt)\s*$", re.I)
+
+# 일본 증권코드는 **영숫자**다. 4자리 숫자가 고갈돼 2024년부터 '285A'(키옥시아) 같은 코드가
+# 발급되고 있어, 예전의 q.isdigit() 판정으로는 2024년 이후 신규상장사를 전부 못 찾았다
+# (실측: 코드목록에 영숫자 코드 364개). EDINET 목록에는 4자리형과 끝에 0 을 붙인 5자리형이
+# 함께 들어있다(285A / 285A0).
+_SEC_CODE_RE = re.compile(r"^[0-9][0-9A-Z]{3}0?$", re.I)
+
+
+def _norm_ja(s: str) -> str:
+    """일문 사명 정규화 — 법인격 표기와 공백을 뗀다. 등록명은
+    'キオクシアホールディングス株式会社' 인데 사용자는 보통 뒤의 株式会社 를 빼고 쓴다."""
+    s = re.sub(r"(株式会社|合同会社|有限会社)", "", s or "")
+    return re.sub(r"[\s　]", "", s)
+
+
 @ttl_cache(TTL_INDEX, maxsize=1)
 def _company_index() -> tuple[dict, dict, dict]:
     """EdinetCode 목록 → (증권코드→entry, 정규화영문명→entry, 일문명→entry)."""
@@ -118,6 +139,9 @@ def _company_index() -> tuple[dict, dict, dict]:
                 by_seccode.setdefault(seccode[:-1], entry)  # 4자리 코드로도 조회 가능
         if name_ja:
             by_ja.setdefault(name_ja, entry)
+            nj = _norm_ja(name_ja)   # 株式会社 를 뗀 표기로도 찾을 수 있게 같이 등록
+            if nj:
+                by_ja.setdefault(nj, entry)
         norm_en = _norm_en(name_en) if name_en else ""
         if norm_en:  # name_en 이 "-"(미기재) 등이면 norm 이 빈 문자열이 되어
             by_en.setdefault(norm_en, entry)  # "" in qn 이 항상 True 라 오탐 유발 → 제외
@@ -126,14 +150,19 @@ def _company_index() -> tuple[dict, dict, dict]:
 
 def resolve(company: str) -> dict:
     """회사명(영/일문) 또는 증권코드(4~5자리) → {edinet_code, name_ja, name_en, sec_code, fiscal_year_end}."""
-    q = company.strip()
+    q = _TICKER_SUFFIX_RE.sub("", (company or "").strip())
     by_seccode, by_en, by_ja = _company_index()
-    if q.isdigit() and len(q) in (4, 5):
-        if q in by_seccode:
-            return by_seccode[q]
-        raise DataError(f"증권코드 {q} 를 EDINET 에서 못 찾음")
+    # 증권코드로 보이면 먼저 코드로 찾되, **못 찾아도 여기서 끝내지 않는다** — 'SONY' 처럼
+    # 코드 모양인 사명이 있어 즉시 raise 하면 이름으로는 찾을 수 있는 회사를 놓친다.
+    if _SEC_CODE_RE.match(q):
+        hit = by_seccode.get(q.upper())
+        if hit:
+            return hit
     if q in by_ja:
         return by_ja[q]
+    qja = _norm_ja(q)
+    if qja and qja in by_ja:
+        return by_ja[qja]
     qn = _norm_en(q)
     if qn and qn in by_en:
         return by_en[qn]
@@ -212,13 +241,22 @@ def _find_annual_doc(edinet_code: str, fye_month: int, fye_day: int,
 _MAX_SCAN_DAYS = 200  # documents.json 은 날짜 단위 조회만 지원 — 무제한 스캔 방지
 
 
+def _ymd(s: str, what: str) -> date:
+    """YYYYMMDD 파싱. 하이픈이 섞인 ISO 표기('2026-01-01')도 받는다 — 두뇌가 그 형태로
+    넘기는 일이 잦고, 예전엔 문자열을 그대로 잘라 int() 해서
+    'invalid literal for int(): 1-' 라는 원인 불명 크래시가 났다(실측)."""
+    digits = re.sub(r"\D", "", s or "")
+    if len(digits) != 8:
+        raise DataError(f"{what} 는 YYYYMMDD 형식이어야 합니다: {s!r}")
+    return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+
+
 def list_filings(company: str, bgn_de: str, end_de: str, doc_type: str | None = None) -> list[dict]:
     """공시목록 검색. bgn_de/end_de: YYYYMMDD. doc_type 지정 시 그 유형만(예: '120'=유가증권
     보고서). EDINET 는 날짜별 조회만 지원해 day-by-day 스캔 — 기간이 너무 넓으면 에러."""
     ent = resolve(company)
     key = config.require(config.Keys.EDINET, "EDINET_API_KEY")
-    start = date(int(bgn_de[:4]), int(bgn_de[4:6]), int(bgn_de[6:8]))
-    end = date(int(end_de[:4]), int(end_de[4:6]), int(end_de[6:8]))
+    start, end = _ymd(bgn_de, "bgn_de"), _ymd(end_de, "end_de")
     if (end - start).days > _MAX_SCAN_DAYS:
         raise DataError(f"조회 기간이 {_MAX_SCAN_DAYS}일을 초과합니다 — 기간을 좁혀주세요.")
     out: list[dict] = []

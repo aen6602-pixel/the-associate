@@ -29,6 +29,29 @@ def _sanitize(text: str) -> str:
     return _SENSITIVE_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", text)
 
 
+def _content_type(r: "requests.Response") -> str:
+    return (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+
+
+def _reject_error_page(r: "requests.Response", url: str) -> None:
+    """HTTP 200 인데 HTML 을 준 응답을 **캐시에 넣기 전에** 걸러낸다.
+
+    200 이라고 성공이 아니다. 실측 사고(2026-08): EDINET 이 API 를 다른 호스트로 옮긴 뒤
+    구 호스트가 200 + HTML 에러페이지("規定外操作が行われました")를 돌려주기 시작했다.
+    바이너리 경로는 그 HTML 을 30일 캐시에 저장했고, 호출부는 한참 뒤 zipfile 단계에서
+    'BadZipFile: File is not a zip file' 로 터졌다 — 죽은 URL 과 아무 관계 없어 보이는
+    메시지라 진단이 오래 걸렸고, 캐시 때문에 재배포해도 계속 실패했다.
+    """
+    if _content_type(r) != "text/html":
+        return
+    from .schema import DataError
+
+    raise DataError(
+        f"바이너리 응답을 기대했지만 HTML 페이지를 받았습니다(HTTP {r.status_code}). "
+        f"엔드포인트가 이전·폐지됐거나 인증이 거부됐을 가능성이 높습니다. "
+        f"URL: {_sanitize(url)}")
+
+
 def session() -> requests.Session:
     global _session
     if _session is None:
@@ -57,6 +80,7 @@ def get_bytes(url: str, ttl_hours: float = 24 * 7, headers: dict | None = None,
         r.raise_for_status()
     except requests.exceptions.HTTPError as e:
         raise requests.exceptions.HTTPError(_sanitize(str(e)), response=r) from None
+    _reject_error_page(r, full)   # 오염된 응답을 캐시에 굳히기 전에 막는다
     cp.write_bytes(r.content)
     return r.content
 
@@ -98,7 +122,18 @@ def get_json(url: str, ttl_hours: float = 6, headers: dict | None = None,
         r.raise_for_status()
     except requests.exceptions.HTTPError as e:
         raise requests.exceptions.HTTPError(_sanitize(str(e)), response=r) from None
-    data = r.json()
+    try:
+        data = r.json()
+    except ValueError:
+        # 예전엔 여기서 raw JSONDecodeError("Expecting value: line 1 column 1")가 그대로
+        # 올라가 '무엇이 잘못됐는지' 를 전혀 알 수 없었다 — 죽은 엔드포인트가 200+HTML 을
+        # 주는 흔한 경우를 이름 붙여 알려준다.
+        from .schema import DataError
+
+        raise DataError(
+            f"JSON 응답을 기대했지만 {_content_type(r) or '알 수 없는 형식'} 을 받았습니다"
+            f"(HTTP {r.status_code}). 엔드포인트가 이전·폐지됐거나 인증이 거부됐을 수 "
+            f"있습니다. URL: {_sanitize(full)}") from None
     cp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return data
 
