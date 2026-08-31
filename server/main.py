@@ -441,15 +441,27 @@ def _muse_key(viewer: auth.Viewer) -> str:
     return f"{viewer.key}__muse"
 
 
-@app.get("/api/muse/channels")
-def muse_channels(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
-    from providers import marketmuse
+@app.get("/api/muse/status")
+def muse_status(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    """수집 현황. 데이터가 낡았으면 **화면을 막지 않고** 뒤에서 다시 모은다."""
+    from providers import telegram_muse as tg
 
-    try:
-        return {"channels": marketmuse.channels(), "meta": {
-            k: marketmuse.snapshot().get(k) for k in ("generated_at", "count", "lookback_days")}}
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"채널 데이터를 불러오지 못했습니다: {e}")
+    started = False
+    if tg.is_stale() and not tg.collect_status()["running"]:
+        started = tg.collect_in_background()
+    return {**tg.stats(), **tg.collect_status(), "refresh_started": started}
+
+
+@app.post("/api/muse/collect")
+def muse_collect(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    """'지금 수집' — 관리자만. 텔레그램 rate-limit 이 있어 아무나 누르게 두지 않는다."""
+    from providers import telegram_muse as tg
+
+    if auth.is_configured() and not auth.is_admin(viewer):
+        raise HTTPException(status_code=403, detail="수집은 관리자만 실행할 수 있습니다.")
+    if not tg.collect_in_background():
+        raise HTTPException(status_code=409, detail="이미 수집 중입니다.")
+    return {"started": True}
 
 
 @app.get("/api/muse/sessions")

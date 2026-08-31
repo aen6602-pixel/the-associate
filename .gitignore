@@ -16,3 +16,8 @@ outputs/
 
 # 스크래치 · 디버그 덤프 (_mops_raw.txt, _sec_debug.txt 등)
 _*.txt
+
+# Market Muse 로컬 수집 DB. 배포에선 DATA_DIR(볼륨)에 생기지만, DATA_DIR 이 없는
+# 로컬에서는 앱 폴더로 폴백한다 — 텔레그램 채널 원문이라 저장소에 올리면 안 된다.
+muse.db
+*.session

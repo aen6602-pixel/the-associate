@@ -30,28 +30,63 @@ async function api(path, options = {}) {
   if (!me.authenticated) { location.href = '/'; return; }   // 로그인 게이트는 본 앱이 담당
   $('viewer-label').textContent = `👤 ${me.label || ''}`;
 
-  try {
-    const d = await api('/api/muse/channels');
-    state.channels = d.channels || [];
-    $('ch-count').textContent = `(${state.channels.length})`;
-    const m = d.meta || {};
-    $('snap-meta').textContent =
-      `최근 ${m.lookback_days ?? '?'}일 · ${(m.count ?? 0).toLocaleString()}건 · `
-      + `${String(m.generated_at || '').slice(0, 16).replace('T', ' ')} 수집`;
-    $('channel-select').insertAdjacentHTML('beforeend', state.channels
-      .map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join(''));
-    $('channel-list').innerHTML = state.channels
-      .map((c) => `<div class="ch"><span>${esc(c.name)}</span><code>${esc(c.id)}</code></div>`).join('');
-  } catch (e) {
-    // 서버가 이미 '무엇이 잘못됐는지' 를 담아 보낸다 — 여기서 또 감싸면 문구가 겹친다.
-    $('snap-meta').textContent = e.message;
-    $('snap-meta').className = 'warn';
-  }
-
+  await loadStatus();
   await newSession();
   await loadSessions();
   $('question').focus();
 })();
+
+/* 수집 현황. 수집이 도는 중이면 끝날 때까지 주기적으로 다시 본다. */
+let pollTimer = null;
+async function loadStatus() {
+  let d;
+  try {
+    d = await api('/api/muse/status');
+  } catch (e) {
+    $('snap-meta').textContent = e.message;
+    $('snap-meta').className = 'warn';
+    return;
+  }
+  state.channels = d.channels || [];
+  $('ch-count').textContent = `(${state.channels.length}/${d.configured ?? 0})`;
+
+  const when = d.collected_at
+    ? String(d.collected_at).slice(0, 16).replace('T', ' ') : '아직 수집 안 함';
+  $('snap-meta').className = 'hint';
+  $('snap-meta').textContent = d.running
+    ? `수집 중… ${d.note || ''}`
+    : `최근 ${d.lookback_days}일 · ${(d.count || 0).toLocaleString()}건 · ${when}`;
+  if (d.last_error) {
+    $('snap-meta').className = 'warn';
+    $('snap-meta').textContent += `\n⚠︎ ${d.last_error}`;
+  }
+
+  // 채널 선택 목록 — 실제로 글이 쌓인 채널만 고를 수 있게 한다.
+  const sel = $('channel-select');
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">전체 채널</option>' + state.channels
+    .map((c) => `<option value="${esc(c.id)}">${esc(c.id)} (${c.n})</option>`).join('');
+  sel.value = keep;
+  $('channel-list').innerHTML = state.channels.map((c) => `<div class="ch">
+      <span>${esc(c.id)}</span><code>${c.n}건 · ${esc(String(c.last || '').slice(0, 10))}</code>
+    </div>`).join('') || '<p class="hint">아직 모은 글이 없습니다.</p>';
+
+  clearTimeout(pollTimer);
+  if (d.running || d.refresh_started) pollTimer = setTimeout(loadStatus, 3000);
+}
+
+$('collect-btn').addEventListener('click', async () => {
+  const b = $('collect-btn');
+  b.disabled = true;
+  try {
+    await api('/api/muse/collect', { method: 'POST' });
+    await loadStatus();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    b.disabled = false;
+  }
+});
 
 async function newSession() {
   const fresh = await api('/api/sessions/new', { method: 'POST' });

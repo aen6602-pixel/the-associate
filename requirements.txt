@@ -9,6 +9,10 @@ google-genai==2.17.0    # Gemini (무료티어, 로컬 기본)
 openai==2.53.0          # GPT (배포 기본 두뇌). DeepSeek 도 이 패키지 재사용(base_url 만 다른 OpenAI 호환 API)
 anthropic==0.120.2      # Claude (로컬 CLI 경로용, 배포에선 미사용)
 
+# Market Muse — 텔레그램 채널 수집(MTProto).
+# 봇 토큰으로는 채널 글을 못 읽어(봇은 자신이 속한 대화만 본다) 사람 계정 세션을 쓴다.
+telethon==1.36.0
+
 # HTTP / 파싱
 requests==2.34.2
 truststore==0.10.4      # 사내 TLS 검사 환경용. 클라우드에선 불필요하나 config 의 try/except 로 무해

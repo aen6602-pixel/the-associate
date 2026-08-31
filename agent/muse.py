@@ -11,7 +11,7 @@ import json
 from typing import Iterator
 
 from core import config
-from providers import marketmuse
+from providers import telegram_muse as tg
 
 # 원본 프로젝트(web/api/ask.js)의 시스템 프롬프트를 옮기되, **출처의 성격**을 분명히 하는
 # 문단을 더했다 — 이 답변이 The Associate 안에서 공시 기반 답변과 나란히 보이기 때문이다.
@@ -48,7 +48,7 @@ def _context(posts: list[dict]) -> str:
     """근거 글 묶음. 길이 상한에 걸리면 **최신 것부터** 담아 뒤를 자른다."""
     out, used = [], 0
     for p in posts:
-        body = marketmuse.clean_text(p.get("text", ""))
+        body = tg.clean_text(p.get("text", ""))
         if not body:
             continue
         block = f"[{p.get('channel', '?')} | {str(p.get('date', ''))[:10]}]\n{body}"
@@ -67,7 +67,7 @@ def answer(question: str, history: list[dict] | None = None,
     provider = (provider or config.LLM_PROVIDER).lower()
 
     try:
-        posts = marketmuse.search(question, limit=30, channel=channel)
+        posts = tg.search(question, limit=30, channel=channel)
     except Exception as e:  # noqa: BLE001
         yield {"type": "error", "text": f"채널 데이터를 불러오지 못했습니다: {e}"}
         return
@@ -80,7 +80,7 @@ def answer(question: str, history: list[dict] | None = None,
 
     yield {"type": "sources", "posts": [
         {"channel": p.get("channel"), "date": p.get("date"),
-         "excerpt": marketmuse.clean_text(p.get("text", ""))[:180]} for p in posts]}
+         "excerpt": tg.clean_text(p.get("text", ""))[:180]} for p in posts]}
 
     msgs = [{"role": h["role"], "content": h["content"]}
             for h in (history or [])[-MAX_HISTORY:] if h.get("content")]
