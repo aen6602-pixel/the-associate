@@ -140,9 +140,6 @@ async function enterApp() {
   state.sessionId = fresh.id;
   renderSessions();
   $('question').focus();
-
-  // 화면을 다 그린 뒤 확인한다 — await 하지 않아야 첫 화면이 늦어지지 않는다.
-  loadHealth();
 }
 
 /* ── 엔진 선택 ───────────────────────────────────────── */
@@ -258,7 +255,7 @@ function renderSources(srcs, roadmap) {
       const tierKo = s.tier === 'authoritative'
         ? '공식 (정부·중앙은행·거래소)' : '참조 (업계표준 데이터셋)';
       const msg = s.status === 'nokey' ? statusText.nokey(s) : statusText[s.status];
-      html += `<details class="src" data-src="${esc(s.name)}">
+      html += `<details class="src">
         <summary><span>${s.tier_icon} ${esc(s.name)}</span><span class="badge">${esc(s.badge)}</span></summary>
         <div class="src-body">
           <p><strong>${esc(s.org)}</strong></p>
@@ -299,78 +296,10 @@ function wireAccordion() {
   }
 }
 
-/* ── 소스 실측 점검 ───────────────────────────────────────
- * 사이드바의 '연결' 표시는 원래 **환경변수에 키가 있는지**만 봤다. EDINET 이 API 호스트를
- * 옮겨 일본 조회가 통째로 죽은 동안에도 계속 '✅ 연결' 이었다(2026-08 실측). 그래서 실제
- * 응답을 확인한 결과로 덮어쓴다. bootstrap 과 분리한 이유는 전 소스를 두드리는 데 수 초가
- * 걸려 첫 화면이 그만큼 늦어지기 때문 — 화면을 먼저 그리고 결과가 오면 갱신한다.
- */
-const HEALTH_BADGE = {
-  up: ['✅ 정상', 'live'],
-  down: ['❌ 응답없음', 'down'],
-  nokey: ['⬜ 키 필요', 'nokey'],
-  planned: ['🔜 예정', 'planned'],
-};
-
-function applyHealth(snap) {
-  for (const r of snap.sources || []) {
-    const el = document.querySelector(`.src[data-src="${CSS.escape(r.name)}"]`);
-    if (!el) continue;   // 카탈로그에 행이 없는 소스(MOPS 등)는 표시할 자리가 없다
-    const [label, cls] = HEALTH_BADGE[r.state] || HEALTH_BADGE.down;
-    const badge = el.querySelector('.badge');
-    if (badge) badge.textContent = label;
-    const box = el.querySelector('.status');
-    if (box) {
-      box.className = `status ${cls}`;
-      box.textContent = r.state === 'up'
-        ? `${r.detail} · 응답 ${r.ms}ms`
-        : r.detail;
-    }
-    // 죽은 소스를 펼쳐두지는 않는다 — 아코디언(한 번에 하나)과 충돌해서 여러 개가
-    // 죽으면 마지막 하나만 남고, 무엇보다 사이드바가 열린 채로 길어진다.
-    // 어느 소스가 죽었는지는 아래 요약 바가 이름으로 알려주고, 배지가 ❌ 로 바뀐다.
-  }
-
-  const down = snap.down || [];
-  const bar = $('health-bar');
-  bar.hidden = false;
-  bar.className = `health-bar ${down.length ? 'bad' : 'ok'}`;
-  const when = new Date((snap.checked_at || 0) * 1000);
-  const hhmm = Number.isFinite(when.getTime())
-    ? `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}` : '';
-
-  if (!down.length) {
-    $('health-msg').textContent = `모든 소스 정상 · ${hhmm} 확인`;
-    $('health-msg').title = '';
-    return;
-  }
-  // 실패 사유와 '무엇이 막히는지' 를 여기서 바로 보여준다. 예전에는 소스 이름만 띄워
-  // 전면 장애처럼 읽혔고, 원인을 보려면 해당 줄을 찾아 펼쳐야 했다.
-  const rows = (snap.sources || []).filter((r) => r.state === 'down');
-  $('health-msg').textContent = rows.map((r) =>
-    `⚠︎ ${r.name} 응답 없음${r.used_by ? ` — ${r.used_by} 만 영향` : ''}\n${r.detail}`).join('\n');
-  $('health-msg').title = rows.map((r) => `${r.name}: ${r.detail}`).join('\n');
-}
-
-async function loadHealth(refresh = false) {
-  const btn = $('health-refresh');
-  btn.disabled = true;
-  const prev = btn.textContent;
-  btn.textContent = '확인 중…';
-  try {
-    applyHealth(await api(`/api/health/sources${refresh ? '?refresh=true' : ''}`));
-  } catch (e) {
-    const bar = $('health-bar');
-    bar.hidden = false;
-    bar.className = 'health-bar bad';
-    $('health-msg').textContent = `점검 실패: ${e.message}`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = prev;
-  }
-}
-
-$('health-refresh').addEventListener('click', () => loadHealth(true));
+/* 소스 실측 점검은 화면에서 뺐다(사용자 요청).
+ * 서버의 GET /api/health/sources 는 남아 있어 필요할 때 직접 조회할 수 있고,
+ * 실패는 서버 로그에 남는다(core/health.py) — 화면을 어지럽히지 않으면서
+ * EDINET 때처럼 소스가 조용히 죽는 상황은 여전히 되짚을 수 있다. */
 
 /* ── 절차서(playbook) ────────────────────────────────── */
 function renderSkills(list) {
