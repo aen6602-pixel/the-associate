@@ -90,6 +90,10 @@ def check_all() -> list[dict]:
                 continue
         to_probe[name] = fn
 
+    # 어느 소스가 죽었을 때 '무엇이' 안 되는지까지 알려준다 — 이름만 붉게 띄우면
+    # 전면 장애처럼 읽히지만, 실제로는 그 소스를 쓰는 기능만 막힌다.
+    used_by = {s["name"]: s.get("used_by") for s in sources.SOURCES}
+
     if to_probe:
         with ThreadPoolExecutor(max_workers=min(8, len(to_probe))) as pool:
             futures = {pool.submit(_run_one, n, f): n for n, f in to_probe.items()}
@@ -103,6 +107,8 @@ def check_all() -> list[dict]:
 
     order = list(probes)
     out.sort(key=lambda r: order.index(r["name"]) if r["name"] in order else 99)
+    for r in out:
+        r["used_by"] = used_by.get(r["name"])
 
     # 실패는 서버 로그에도 남긴다 — 사이드바 문구는 그 순간 화면을 본 사람만 보고,
     # 배포 환경에서만 나는 실패는 나중에 로그로 되짚는 수밖에 없다.

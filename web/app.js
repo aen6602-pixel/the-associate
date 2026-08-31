@@ -338,9 +338,18 @@ function applyHealth(snap) {
   const when = new Date((snap.checked_at || 0) * 1000);
   const hhmm = Number.isFinite(when.getTime())
     ? `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}` : '';
-  $('health-msg').textContent = down.length
-    ? `⚠︎ ${down.join(', ')} 응답 없음 — 이 소스가 필요한 질문은 실패합니다`
-    : `모든 소스 정상 · ${hhmm} 확인`;
+
+  if (!down.length) {
+    $('health-msg').textContent = `모든 소스 정상 · ${hhmm} 확인`;
+    $('health-msg').title = '';
+    return;
+  }
+  // 실패 사유와 '무엇이 막히는지' 를 여기서 바로 보여준다. 예전에는 소스 이름만 띄워
+  // 전면 장애처럼 읽혔고, 원인을 보려면 해당 줄을 찾아 펼쳐야 했다.
+  const rows = (snap.sources || []).filter((r) => r.state === 'down');
+  $('health-msg').textContent = rows.map((r) =>
+    `⚠︎ ${r.name} 응답 없음${r.used_by ? ` — ${r.used_by} 만 영향` : ''}\n${r.detail}`).join('\n');
+  $('health-msg').title = rows.map((r) => `${r.name}: ${r.detail}`).join('\n');
 }
 
 async function loadHealth(refresh = false) {

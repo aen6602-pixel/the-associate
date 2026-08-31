@@ -44,6 +44,15 @@ def test_a_dead_source_is_reported_down_not_connected(probes):
     assert snap["down"] == ["EDINET"]
 
 
+def test_failure_says_what_it_actually_blocks(probes):
+    """소스 이름만 붉게 띄우면 전면 장애처럼 읽힌다 — 실제로 막히는 기능을 함께 알려야
+    사용자가 '지금 하려는 일에 영향이 있나' 를 판단할 수 있다."""
+    probes({"FRED": lambda: (_ for _ in ()).throw(DataError("403"))})
+    row = next(r for r in health.snapshot(force=True)["sources"] if r["name"] == "FRED")
+    assert row["used_by"], "카탈로그의 used_by 가 결과에 실려야 한다"
+    assert "무위험수익률" in row["used_by"]
+
+
 def test_all_healthy_reports_nothing_down(probes):
     probes({"DART": lambda: "OK", "EDINET": lambda: "OK"})
     assert health.snapshot(force=True)["down"] == []

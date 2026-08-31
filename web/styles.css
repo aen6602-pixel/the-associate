@@ -249,9 +249,11 @@ button:disabled { opacity: .5; cursor: default; }
 .src-body .status.down { background: var(--bad-bg); color: var(--bad-fg); }
 
 /* 소스 실측 점검 결과 요약 */
-.health-bar { display: flex; align-items: center; gap: .5rem; justify-content: space-between;
+.health-bar { display: flex; align-items: flex-start; gap: .5rem; justify-content: space-between;
               margin: .1rem 0 .6rem; padding: .4rem .55rem; border-radius: 6px;
               font-size: .78rem; border: 1px solid var(--line); background: var(--panel); }
+/* 실패 사유를 여러 줄로 그대로 보여준다(원인이 한 줄에 안 들어간다). */
+.health-bar #health-msg { white-space: pre-line; line-height: 1.5; word-break: break-word; }
 .health-bar.ok { color: var(--ok-fg); border-color: var(--ok-line); }
 .health-bar.bad { color: var(--bad-fg); border-color: var(--bad-line); background: var(--bad-bg); }
 .health-bar button { flex: 0 0 auto; }
