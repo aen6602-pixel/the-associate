@@ -425,6 +425,87 @@ def admin_page() -> FileResponse:
     return FileResponse(WEB_DIR / "admin.html")
 
 
+# ── Market Muse (구독 채널 전언 — 공신력 없음, 본 채팅과 격리) ─────
+# 별도 라우트·별도 세션 네임스페이스로 둔다. 본 채팅의 도구 레지스트리에는 등록하지 않아
+# 밸류에이션 경로가 이 데이터를 건드릴 수 없다.
+class MuseBody(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    session_id: str | None = None
+    channel: str | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+def _muse_key(viewer: auth.Viewer) -> str:
+    """대화기록을 본 채팅과 섞지 않는다 — 목록에 함께 뜨면 어느 쪽 근거인지 헷갈린다."""
+    return f"{viewer.key}__muse"
+
+
+@app.get("/api/muse/channels")
+def muse_channels(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    from providers import marketmuse
+
+    try:
+        return {"channels": marketmuse.channels(), "meta": {
+            k: marketmuse.snapshot().get(k) for k in ("generated_at", "count", "lookback_days")}}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"채널 데이터를 불러오지 못했습니다: {e}")
+
+
+@app.get("/api/muse/sessions")
+def muse_sessions(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    return {"sessions": hist.list_sessions(_muse_key(viewer))}
+
+
+@app.get("/api/muse/sessions/{sid}")
+def muse_session(sid: str, viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    rec = hist.load_session(sid, _muse_key(viewer))
+    if rec is None:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+    return {"id": rec.get("id"), "title": rec.get("title"),
+            "messages": _with_html(rec.get("messages", []))}
+
+
+@app.post("/api/muse/ask")
+def muse_ask(body: MuseBody, viewer: auth.Viewer = Depends(current_viewer)) -> StreamingResponse:
+    from agent import muse
+
+    sid = body.session_id or hist.new_session_id()
+    prior = list((hist.load_session(sid, _muse_key(viewer)) or {}).get("messages", []))
+    question = body.question.strip()
+
+    def stream() -> Iterator[str]:
+        yield _sse({"type": "start", "session_id": sid})
+        final_text, posts = "", []
+        try:
+            for ev in muse.answer(question, prior, body.provider, body.model, body.channel):
+                if ev.get("type") == "sources":
+                    posts = ev.get("posts") or []
+                elif ev.get("type") == "final":
+                    final_text = ev.get("text") or ""
+                yield _sse(ev)
+        except Exception as e:  # noqa: BLE001
+            log.exception("muse ask failed")
+            yield _sse({"type": "error", "text": str(e)})
+
+        messages = prior + [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": final_text, "posts": posts},
+        ]
+        hist.save_session(sid, messages, _muse_key(viewer))
+        yield _sse({"type": "final_html", "html": markdown.render(final_text)})
+        yield _sse({"type": "done", "session_id": sid,
+                    "sessions": hist.list_sessions(_muse_key(viewer))})
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/muse", response_class=HTMLResponse)
+def muse_page() -> FileResponse:
+    return FileResponse(WEB_DIR / "muse.html")
+
+
 # ── 데이터 소스 실측 점검 ────────────────────────────────────────
 # bootstrap 에 넣지 않는 이유: 전 소스를 두드리는 데 수 초가 걸려 그만큼 첫 화면이 늦어진다.
 # 프론트가 화면을 먼저 그린 뒤 따로 부른다.

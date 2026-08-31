@@ -400,6 +400,30 @@ button:disabled { opacity: .5; cursor: default; }
 .md th { background: var(--panel-2); font-weight: 600; }
 .md tbody tr:nth-child(even) { background: var(--zebra); }
 
+/* ── Market Muse ─────────────────────────────────────────
+   공시 기반 답변과 **한눈에 구분되어야** 한다. 같은 화면 톤을 쓰되 경고를 상시 노출한다. */
+.muse-warn { background: var(--info-bg); color: var(--info-fg); border: 1px solid var(--line);
+             border-radius: 6px; padding: .5rem .6rem; font-size: .74rem; line-height: 1.55;
+             margin: .2rem 0 .7rem; }
+.muse-foot { margin-top: .7rem; padding-top: .5rem; border-top: 1px dashed var(--line);
+             color: var(--text-mute); font-size: .72rem; }
+.muse-filter { display: flex; flex-direction: column; gap: .25rem; margin: .5rem 0 .7rem; }
+.muse-filter span { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase;
+                    color: var(--text-mute); }
+.muse-filter select { background: var(--panel-2); border: 1px solid var(--line);
+                      border-radius: 6px; padding: .35rem .45rem; }
+.ch { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline;
+      font-size: .76rem; color: var(--text-dim); padding: .18rem .1rem;
+      border-bottom: 1px solid var(--line); }
+.ch code { color: var(--text-mute); font-size: .7rem; }
+
+/* 본 화면에서 Market Muse 로 넘어가는 입구 */
+.muse-link { display: block; width: 100%; text-align: left; margin: .1rem 0 .2rem;
+             border: 1px solid var(--line); background: var(--panel-2); border-radius: 6px;
+             padding: .45rem .6rem; color: var(--text-dim); font-size: .82rem; }
+.muse-link:hover { border-color: var(--info-fg); color: var(--text); }
+.muse-link b { color: var(--info-fg); font-weight: 600; }
+
 /* 진행 단계 — 도구가 흘러가기만 하면 어디까지 왔는지 알 수 없다. */
 .steps { display: flex; flex-wrap: wrap; gap: .3rem .5rem; margin: 0 0 .55rem; font-size: .74rem; }
 .step { display: inline-flex; align-items: center; gap: .3rem; color: var(--text-mute);

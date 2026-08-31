@@ -34,6 +34,9 @@ class Keys:
     EDINET = os.getenv("EDINET_API_KEY")           # 일본 공시
     FINMIND = os.getenv("FINMIND_TOKEN")           # 대만 재무/주가
     OPENFIGI = os.getenv("OPENFIGI_API_KEY")       # 식별자 매핑(옵션)
+    # Market Muse 스냅샷을 담은 비공개 저장소 읽기용 GitHub 토큰(contents:read 만 있으면 된다).
+    # ⚠️ 이 소스는 공신력이 없다 — providers/marketmuse.py 의 경고 참고.
+    MUSE_GITHUB = os.getenv("MUSE_GITHUB_TOKEN")
 
 
 # SEC 는 키 불필요, 단 User-Agent 로 연락처를 요구한다.

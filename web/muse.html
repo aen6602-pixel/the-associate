@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Market Muse — The Associate</title>
+<link rel="stylesheet" href="/static/styles.css">
+<script>
+  try {
+    var t = localStorage.getItem('assoc-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch (e) { /* 접근 실패 시 기본(다크) */ }
+</script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230A0E17'/><text y='23' x='5' font-size='19' fill='%239FB4CE' font-family='sans-serif' font-weight='600'>M</text></svg>">
+</head>
+<body>
+
+<div class="shell" id="shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="viewer-row">
+      <span class="viewer" id="viewer-label"></span>
+      <a class="ghost sm" href="/" title="밸류에이션 채팅으로">← Associate</a>
+    </div>
+
+    <div class="sec">Market Muse</div>
+    <p class="hint">구독 중인 텔레그램 채널 글에서 찾아 정리합니다.
+      본 채팅(밸류에이션)과 <strong>기록이 분리</strong>되어 있습니다.</p>
+
+    <div class="muse-warn">
+      ⚠︎ 이 데이터는 <strong>공신력이 없습니다</strong>. 공시가 아니라 채널 전언입니다 —
+      수치를 밸류에이션에 쓰려면 공시로 다시 확인해야 합니다.
+    </div>
+
+    <button class="ghost wide" id="new-session">＋&nbsp; New session</button>
+    <div class="session-list" id="session-list"></div>
+
+    <div class="divider"></div>
+    <div class="sec">채널 <span id="ch-count"></span></div>
+    <p class="hint" id="snap-meta">불러오는 중…</p>
+    <label class="muse-filter"><span>채널 한정</span>
+      <select id="channel-select"><option value="">전체 채널</option></select>
+    </label>
+    <div id="channel-list"></div>
+  </aside>
+
+  <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
+  <main class="main">
+    <button class="ghost sm sidebar-toggle" id="sidebar-toggle" title="사이드바">☰</button>
+    <div class="content">
+      <h1>Market Muse<span class="by">구독 채널 브리핑</span></h1>
+      <p class="lede">구독 중인 텔레그램 채널 40여 개의 최근 글에서 찾아 정리합니다.
+        답변에는 근거가 된 채널명과 날짜가 붙습니다.</p>
+      <p class="warn box">여기서 나온 수치는 <strong>확정된 사실이 아니라 전언</strong>입니다.
+        밸류에이션에 넣으려면 Associate 채팅에서 공시로 확인한 뒤 <strong>가정</strong>으로
+        명시해 쓰세요.</p>
+
+      <div class="chat" id="chat"></div>
+    </div>
+
+    <form class="composer" id="composer">
+      <textarea id="question" rows="1" placeholder="채널에서 뭘 찾을까요?  (예: HBM 관련 최근 언급)"
+                autocomplete="off"></textarea>
+      <button type="submit" class="primary" id="send-btn" title="보내기 (Enter)">↑</button>
+    </form>
+  </main>
+</div>
+
+<script src="/static/muse.js"></script>
+</body>
+</html>
