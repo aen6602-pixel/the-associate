@@ -31,6 +31,15 @@ def test_base_url_points_at_the_live_api_host():
         "disclosure.edinet-fsa.go.jp/api/v2 는 폐지됐고 HTTP 200 + HTML 에러페이지를 준다")
 
 
+def test_source_url_is_human_viewable_not_the_api():
+    """provenance.source_url 은 사람이 눌러 원문을 확인하는 링크다. API URL 은
+    Subscription-Key 가 있어야 열려서 링크로 쓰면 '숫자를 클릭해 원문으로' 가 깨진다."""
+    u = edinet.viewer_url("S100YJ18")
+    assert "S100YJ18" in u
+    assert "/api/" not in u and "api.edinet-fsa.go.jp" not in u
+    assert u.startswith("https://disclosure2.edinet-fsa.go.jp/")
+
+
 # ── 2) 200 인데 HTML 인 응답을 캐시에 굳히지 않는다 ─────────────────
 class _FakeResp:
     def __init__(self, ctype: str, body: bytes, status: int = 200):

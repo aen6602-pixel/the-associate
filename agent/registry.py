@@ -107,7 +107,7 @@ def _search_edinet_filings(company: str, bgn_de: str, end_de: str, doc_type: str
         label=f"{company} EDINET 공시목록 ({bgn_de}~{end_de}) — {len(rows)}건",
         provenance=Provenance(
             source="EDINET (일본 금융청) 공시검색", source_type=SourceType.AUTHORITATIVE,
-            source_url="https://disclosure.edinet-fsa.go.jp", original_field="documents.json",
+            source_url=edinet.SEARCH_URL, original_field="documents.json",
             note="docID/docDescription 목록만 제공. 본문은 read_edinet_filing 으로 조회.",
         ),
     )
@@ -119,7 +119,7 @@ def _read_edinet_filing(docid: str, keyword: str | None = None) -> Value:
         label=f"EDINET 공시원문 {docid}" + (f" (키워드='{keyword}')" if keyword else ""),
         provenance=Provenance(
             source="EDINET (일본 금융청) 공시원문", source_type=SourceType.AUTHORITATIVE,
-            source_url=f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{docid}",
+            source_url=edinet.viewer_url(docid),
             original_field="documents/{docid}?type=5(CSV)",
             note="비정형 서술문 원문(일본어). 여기서 읽은 숫자는 **parsed_authoritative** 로 표시하고 문서ID와 근거 문장을 함께 인용한다(문서가 특정되므로 추정이 아니다). 문서에 없어서 네가 미루어 계산·추정한 값만 llm_estimate 다.",
         ),

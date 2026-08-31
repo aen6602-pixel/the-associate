@@ -227,7 +227,7 @@ def history(spec: dict, item: str, n: int = 3) -> dict:
     return {"rows": d["series"], "source": "EDINET (일본 금융청)",
             "basis": f"유가증권보고서 · {d.get('basis')}",
             "filing_date": d.get("filing_date"),
-            "source_url": f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{d['docid']}",
+            "source_url": edinet.viewer_url(d["docid"]),
             "currency": "JPY"}
 
 

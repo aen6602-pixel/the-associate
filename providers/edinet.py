@@ -39,6 +39,18 @@ from core import config
 _BASE = "https://api.edinet-fsa.go.jp/api/v2"
 _CODELIST_URL = "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/codelist/Edinetcode.zip"
 
+# 사람이 브라우저로 여는 열람 화면(提出書類内容照会画面). provenance 의 source_url 은
+# **클릭해서 원문을 확인하는 링크**이므로 API URL 을 쓰면 안 된다 — API 는 Subscription-Key
+# 가 있어야 열려서, 링크를 눌러도 문서 대신 오류가 나고 "숫자를 클릭해 원문으로" 라는
+# 이 앱의 전제가 깨진다.
+_VIEWER = "https://disclosure2.edinet-fsa.go.jp/WZEK0040.aspx"
+SEARCH_URL = "https://disclosure2.edinet-fsa.go.jp/WEEK0010.aspx"
+
+
+def viewer_url(docid: str) -> str:
+    """공시 원문 열람 URL(로그인·키 불필요)."""
+    return f"{_VIEWER}?{docid}"
+
 _ANNUAL_REPORT_DOC_TYPE = "120"  # 有価証券報告書
 
 # item 키 → (kind: duration(기간)|instant(시점), [XBRL 태그 후보, 우선순위순])
@@ -409,7 +421,7 @@ def financial_item(company: str, item: str, year: int | None = None) -> Value:
         label=f"{name} {ITEM_LABEL[item]} (FY{fy}, {basis})",
         provenance=Provenance(
             source="EDINET (일본 금융청)", source_type=SourceType.AUTHORITATIVE,
-            source_url=f"{_BASE}/documents/{doc['docID']}",
+            source_url=viewer_url(doc["docID"]),
             original_field=f"XBRL要素ID: {tag}",
             as_of=f"FY{fy}", filing_date=filing_date,
             note=(f"EDINETコード={ent['edinet_code']}, docID={doc['docID']}, 기준={basis}"
@@ -464,7 +476,7 @@ def shares_outstanding(company: str, year: int | None = None) -> Value:
         value=row["val"], unit="株", label=f"{name} 발행주식총수 (FY{fy})",
         provenance=Provenance(
             source="EDINET (일본 금융청)", source_type=SourceType.AUTHORITATIVE,
-            source_url=f"{_BASE}/documents/{doc['docID']}",
+            source_url=viewer_url(doc["docID"]),
             original_field=f"XBRL要素ID: {tag}",
             as_of=f"FY{fy}", filing_date=filing_date,
             note=f"EDINETコード={ent['edinet_code']}, docID={doc['docID']}",
