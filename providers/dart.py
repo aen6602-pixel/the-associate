@@ -1294,3 +1294,21 @@ def filing_text(rcept_no: str, keyword: str | None = None, context_chars: int = 
         "note": ("문서가 길어 앞부분만 반환됨. 특정 회사명/키워드를 찾으려면 keyword 인자를 지정하라."
                 if truncated else None),
     }
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    """살아있는지 실제 호출로 확인한다(캐시 우회). 실패하면 DataError."""
+    from datetime import timedelta
+    from core.http import probe
+
+    key = config.require(config.Keys.DART, "DART_API_KEY")
+    today = date.today()
+    j = probe("GET", f"{_BASE}/list.json", params={
+        "crtfc_key": key, "page_count": 1,
+        "bgn_de": (today - timedelta(days=7)).strftime("%Y%m%d"),
+        "end_de": today.strftime("%Y%m%d")}).json()
+    st = j.get("status")
+    if st not in ("000", "013"):   # 013 = 조회 결과 없음(응답 자체는 정상)
+        raise DataError(f"DART 응답 코드 {st}: {j.get('message')}")
+    return "공시목록 조회 OK"

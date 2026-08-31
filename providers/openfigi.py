@@ -99,3 +99,14 @@ def figi(id_type: str, id_value: str, exch_code: str | None = None,
             note=note,
         ),
     )
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    j = probe("POST", _URL, headers=_headers(),
+              json_body=[{"idType": "TICKER", "idValue": "AAPL", "exchCode": "US"}]).json()
+    if not (isinstance(j, list) and j and (j[0].get("data") or j[0].get("warning"))):
+        raise DataError(f"OpenFIGI 응답이 예상과 다릅니다: {str(j)[:120]}")
+    return "식별자 매핑 OK"

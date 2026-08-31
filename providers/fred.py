@@ -38,3 +38,16 @@ def risk_free_rate(tenor: str = "10Y") -> Value:
                 ),
             )
     raise DataError(f"FRED {series} 유효 관측치를 찾지 못함")
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    key = config.require(config.Keys.FRED, "FRED_API_KEY")
+    j = probe("GET", "https://api.stlouisfed.org/fred/series/observations", params={
+        "series_id": "DGS10", "api_key": key, "file_type": "json",
+        "sort_order": "desc", "limit": 1}).json()
+    if not j.get("observations"):
+        raise DataError("FRED 관측치가 비어 있습니다")
+    return "미국채 10Y 조회 OK"

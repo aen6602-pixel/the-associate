@@ -195,6 +195,16 @@ button:disabled { opacity: .5; cursor: default; }
 .src-body .status.live { background: #10281A; color: #7EE2A0; }
 .src-body .status.nokey { background: #2B2210; color: #E5C07B; }
 .src-body .status.planned { background: #16202E; color: #9FB4CE; }
+.src-body .status.down { background: #2B1416; color: #F0919A; }
+
+/* 소스 실측 점검 결과 요약 */
+.health-bar { display: flex; align-items: center; gap: .5rem; justify-content: space-between;
+              margin: .1rem 0 .6rem; padding: .4rem .55rem; border-radius: 6px;
+              font-size: .78rem; border: 1px solid var(--line); background: var(--panel); }
+.health-bar.ok { color: #7EE2A0; border-color: #1E4030; }
+.health-bar.bad { color: #F0919A; border-color: #4A2126; background: #21151A; }
+.health-bar button { flex: 0 0 auto; }
+.health-bar[hidden] { display: none; }
 
 /* ── 메인 ───────────────────────────────────────────── */
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }

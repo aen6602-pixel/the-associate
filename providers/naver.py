@@ -212,3 +212,13 @@ def index_series(index: str = "KOSPI", period: str = "week", years: int = 5) -> 
     if idx not in ("KOSPI", "KOSDAQ"):
         raise DataError(f"지원하지 않는 지수: {index} (KOSPI, KOSDAQ)")
     return _chart(f"index/{idx}", period, years)
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    j = probe("GET", "https://m.stock.naver.com/api/stock/005930/basic", headers=_UA).json()
+    if not j.get("stockName"):
+        raise DataError("네이버 응답에 종목명이 없습니다")
+    return "KRX 시세 조회 OK"

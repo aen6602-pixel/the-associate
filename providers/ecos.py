@@ -82,3 +82,17 @@ def corporate_bond_yield(rating: str = "AA-") -> Value:
             note="한국은행이 고시하는 등급은 AA- / BBB- 두 구간뿐 — 그 사이 등급은 보간하지 "
                  "않고 가까운 구간을 쓰며 그 사실을 밝힌다."),
     )
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    key = config.require(config.Keys.ECOS, "ECOS_API_KEY")
+    end = date.today().strftime("%Y%m%d")
+    start = (date.today() - timedelta(days=14)).strftime("%Y%m%d")
+    j = probe("GET", f"https://ecos.bok.or.kr/api/StatisticSearch/{key}/json/kr/1/1/"
+                     f"{_STAT}/D/{start}/{end}/{_ITEM['10Y']}").json()
+    if "RESULT" in j:
+        raise DataError(f"ECOS 오류: {j['RESULT'].get('MESSAGE', '')}")
+    return "시장금리(국고채) 조회 OK"

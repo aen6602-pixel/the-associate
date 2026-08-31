@@ -82,7 +82,7 @@ def _reject_error_page(r: "requests.Response", url: str) -> None:
     from .schema import DataError
 
     raise DataError(
-        f"바이너리 응답을 기대했지만 HTML 페이지를 받았습니다(HTTP {r.status_code}). "
+        f"데이터 대신 HTML 페이지를 받았습니다(HTTP {r.status_code}). "
         f"엔드포인트가 이전·폐지됐거나 인증이 거부됐을 가능성이 높습니다. "
         f"URL: {_sanitize(url)}")
 
@@ -171,6 +171,29 @@ def get_json(url: str, ttl_hours: float = 6, headers: dict | None = None,
             f"있습니다. URL: {_sanitize(full)}") from None
     cp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return data
+
+
+def probe(method: str, url: str, headers: dict | None = None, params: dict | None = None,
+          json_body=None, timeout: int = 12):
+    """**캐시를 거치지 않는** 1회성 요청 — 헬스체크 전용.
+
+    헬스체크에 get_json/get_bytes 를 쓰면 안 된다. 그 둘은 디스크 캐시를 먼저 보므로,
+    엔드포인트가 죽어도 캐시에 남은 옛 성공 응답 때문에 계속 '정상' 으로 보인다 —
+    EDINET 사고에서 실제로 그렇게 몇 주를 놓쳤다. 재시도와 HTML 에러페이지 판별은
+    그대로 적용한다.
+    """
+    kw: dict = {"headers": headers, "timeout": timeout}
+    if params is not None:
+        kw["params"] = params
+    if json_body is not None:
+        kw["json"] = json_body
+    r = _request(method, url, **kw)
+    try:
+        r.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        raise requests.exceptions.HTTPError(_sanitize(str(e)), response=r) from None
+    _reject_error_page(r, url)
+    return r
 
 
 def post_json(url: str, json_body, ttl_hours: float = 24 * 7, headers: dict | None = None,

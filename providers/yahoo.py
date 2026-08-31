@@ -182,3 +182,14 @@ def last_close(symbol: str) -> Value:
             note=("비공식 공개 엔드포인트(키 불필요). 거래소 공식 시세가 아니라 집계 시세이므로 "
                   "참조(reference) 등급으로 표기한다.")),
     )
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    j = probe("GET", f"{_CHART}AAPL", headers=_UA,
+              params={"range": "5d", "interval": "1d"}).json()
+    if not ((j.get("chart") or {}).get("result")):
+        raise DataError("Yahoo 차트 응답이 비어 있습니다")
+    return "해외 시세 조회 OK"

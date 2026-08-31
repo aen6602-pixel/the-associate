@@ -332,3 +332,13 @@ def country_risk_premium(country: str = "KR") -> Value:
 def corporate_tax_rate(country: str = "KR") -> Value:
     """법인세율. 단위 %."""
     return _make(country, ("corporate", "tax"), "Corporate Tax Rate")
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    """데이터셋 파일이 그대로 있는지만 확인한다(본문은 받지 않는다 — 수 MB)."""
+    from core.http import probe
+
+    r = probe("HEAD", CTRYPREM_URL)
+    size = r.headers.get("Content-Length")
+    return f"ctryprem.xlsx 접근 OK" + (f" ({int(size):,} bytes)" if size else "")

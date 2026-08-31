@@ -68,3 +68,15 @@ def _via_yahoo(base: str, quote: str, date: str | None) -> Value:
             ),
         )
     return yahoo.fx_rate(base, quote)
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    j = probe("GET", "https://api.frankfurter.app/latest",
+              params={"from": "USD", "to": "KRW"}).json()
+    rates = j.get("rates") or {}
+    if not rates:
+        raise DataError("환율 응답이 비어 있습니다")
+    return f"USD→KRW {list(rates.values())[0]:,}"

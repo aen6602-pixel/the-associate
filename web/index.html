@@ -88,6 +88,12 @@
     <div class="sec">Data Sources</div>
     <p class="hint">Click any item for details. 🟢 official 🔵 reference · ✅ live ⬜ key needed 🔜 planned</p>
 
+    <!-- 실제 응답을 확인한 결과. 키 존재 여부만 보던 표시를 이 결과로 덮어쓴다. -->
+    <div class="health-bar" id="health-bar" hidden>
+      <span id="health-msg">확인 중…</span>
+      <button type="button" class="ghost sm" id="health-refresh" title="지금 다시 확인">다시 확인</button>
+    </div>
+
     <details class="engine" id="engine-box">
       <summary id="engine-summary">🧠 Engine</summary>
       <div class="engine-body">

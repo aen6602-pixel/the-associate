@@ -555,3 +555,13 @@ def filing_text(cik: str, accession: str, filename: str, keyword: str | None = N
         "note": ("문서가 길어 앞부분만 반환됨. 특정 회사명/키워드를 찾으려면 keyword 인자를 지정하라."
                 if truncated else None),
     }
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    j = probe("GET", f"{_BASE_WWW}/files/company_tickers.json", headers=_headers()).json()
+    if not j:
+        raise DataError("company_tickers.json 이 비어 있습니다")
+    return f"티커 매핑 {len(j):,}건"

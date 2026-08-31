@@ -63,3 +63,13 @@ def recent_disclosures_value(company: str) -> Value:
             note="keyless. 최신 영업일 공시만 — 과거 날짜 조회는 이 API 로 불가능(실측 확인).",
         ),
     )
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    j = probe("GET", _RECENT_URL).json()
+    if not isinstance(j, list):
+        raise DataError("MOPS 응답이 목록 형식이 아닙니다")
+    return f"최신 영업일 공시 {len(j)}건"

@@ -482,3 +482,18 @@ def shares_outstanding(company: str, year: int | None = None) -> Value:
             note=f"EDINETコード={ent['edinet_code']}, docID={doc['docID']}",
         ),
     )
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    """documents.json 을 직접 친다 — 2026-08 장애 때 죽었던 바로 그 엔드포인트다.
+    코드목록(주 단위 캐시)만 확인하면 API 가 죽어도 정상으로 보이므로 그쪽은 보지 않는다."""
+    from core.http import probe
+
+    key = config.require(config.Keys.EDINET, "EDINET_API_KEY")
+    d = date.today() - timedelta(days=1)
+    j = probe("GET", f"{_BASE}/documents.json",
+              params={"date": d.isoformat(), "type": 2, "Subscription-Key": key}).json()
+    if "results" not in j:
+        raise DataError("documents.json 응답에 results 가 없습니다")
+    return f"공시목록 OK ({len(j['results'])}건)"

@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent import brain
-from core import (admin, auth, config, history as hist, markdown, paths,
+from core import (admin, auth, config, health, history as hist, markdown, paths,
                   skills as skills_lib, sources)
 
 log = logging.getLogger("associate")
@@ -423,6 +423,15 @@ def admin_session(name: str, sid: str,
 def admin_page() -> FileResponse:
     # 인증은 페이지가 아니라 API 에서 건다 — 화면은 껍데기고 데이터는 전부 API 로 온다.
     return FileResponse(WEB_DIR / "admin.html")
+
+
+# ── 데이터 소스 실측 점검 ────────────────────────────────────────
+# bootstrap 에 넣지 않는 이유: 전 소스를 두드리는 데 수 초가 걸려 그만큼 첫 화면이 늦어진다.
+# 프론트가 화면을 먼저 그린 뒤 따로 부른다.
+@app.get("/api/health/sources")
+def health_sources(refresh: bool = False,
+                   viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    return health.snapshot(force=refresh)
 
 
 # ── 헬스체크 & 정적 파일 ─────────────────────────────────────────

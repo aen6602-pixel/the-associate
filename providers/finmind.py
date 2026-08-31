@@ -454,3 +454,14 @@ def shares_outstanding(company: str, year: int | None = None) -> Value:
             note=f"stock_id={sid}, 集保(예탁결제) 기준 주간 갱신",
         ),
     )
+
+
+# ── 헬스체크 ──────────────────────────────────────────────────────
+def ping() -> str:
+    from core.http import probe
+
+    j = probe("GET", _BASE, params={"dataset": "TaiwanStockInfo", "data_id": "2330",
+                                    "token": _token()}).json()
+    if j.get("status") != 200:
+        raise DataError(f"FinMind 오류: {j.get('status')} {j.get('msg')}")
+    return "대만 종목정보 조회 OK"
