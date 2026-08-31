@@ -476,19 +476,302 @@ function messageHtml(m, index) {
       ${xlsx.map(([, kind, label]) =>
         `<button class="ghost sm" data-export="${kind}" data-index="${index}">${label}</button>`).join('')}
       <button class="ghost sm" data-export="html_report" data-index="${index}">📄 HTML 리포트</button>
+      <button class="ghost sm" data-copy="answer" data-index="${index}">📋 답변 복사</button>
     </div>` : '';
 
-  return `<div class="msg assistant"><div class="avatar">A</div><div class="body">
+  return `<div class="msg assistant" data-idx="${index}"><div class="avatar">A</div><div class="body">
     ${trace.length ? `<details class="trace"><summary>🔍 사용한 데이터 소스 (${trace.length}개)</summary>
       <div class="trace-body">${trace.map(traceItemHtml).join('')}</div></details>` : ''}
     <div class="md">${m.html || esc(m.content)}</div>
     ${exports}</div></div>`;
 }
 
+/* ── 진행 단계 ───────────────────────────────────────────
+ * 도구 호출이 흘러가기만 하면 "지금 뭘 하는 중인지" 를 알 수 없어 대기가 길게 느껴진다.
+ * 도구 이름을 단계로 접어 어디까지 왔는지 보여준다. */
+const STEPS = [
+  { label: '데이터 수집', tools: /^(get_financial|get_market_cap|get_ebitda|search_|read_|get_figi|get_business_mix|get_mops)/ },
+  { label: '가정·자본비용', tools: /^(get_dcf_assumptions|get_net_debt|get_cost_of_debt|get_market_cost_of_debt|get_effective_tax|get_terminal_growth|get_beta|get_industry_benchmarks|compute_wacc|get_equity_risk|get_country_risk|get_corporate_tax|get_risk_free|get_fx)/ },
+  { label: '계산', tools: /^(compute_dcf|compute_scenarios|compute_comps|evaluate_sangjeung|diagnose_implied)/ },
+  { label: '정리', tools: /^$/ },
+];
+
+function stepOf(toolName) {
+  const i = STEPS.findIndex((s) => s.tools.test(toolName || ''));
+  return i < 0 ? 0 : i;
+}
+
+// 되돌아가지 않는다 — 계산 뒤에 보조 조회를 한 번 더 해도 단계가 뒤로 밀리면 혼란스럽다.
+let stepAt = -1;
+function markStep(n) {
+  if (n <= stepAt) return;
+  stepAt = n;
+  const box = $('live-steps');
+  if (!box) return;
+  for (const el of box.querySelectorAll('.step')) {
+    const i = Number(el.dataset.step);
+    el.classList.toggle('done', i < n);
+    el.classList.toggle('at', i === n);
+  }
+}
+
+/* ── 답변 후처리: 근거를 눈에 보이게 ─────────────────────
+ * 아래 모든 것은 **trace(구조화된 도구 결과)** 에서만 만든다. LLM 이 쓴 문장을 파싱해
+ * "이 숫자는 아마 저기서 왔겠지" 라고 추론하지 않는다 — 그 순간 오귀속이 생기고, 그건
+ * 이 앱이 존재 이유로 삼는 원칙을 정면으로 깨는 일이다. 그래서 커버리지가 부분적이더라도
+ * **정확히 일치하는 것만** 표시한다.
+ */
+
+// 계산 도구 → 그 답변의 헤드라인 숫자. 결론 수치가 표 안에 묻히지 않게 카드로 올린다.
+const HEADLINE = {
+  compute_dcf: 'DCF 주당가치',
+  compute_scenarios: 'DCF 시나리오',
+  evaluate_sangjeung_value: '상증법 주당 평가액',
+  compute_wacc_auto: 'WACC',
+  compute_wacc: 'WACC',
+  get_market_cap: '시가총액',
+  diagnose_implied_assumptions: '목표가 역산',
+};
+
+const CALC_METHOD = {
+  compute_dcf: 'DCF (UFCF)',
+  compute_scenarios: 'DCF 시나리오 (Base/Bull/Bear)',
+  compute_comps: 'Trading Comps',
+  evaluate_sangjeung_value: '상증법 보충적 평가',
+  diagnose_implied_assumptions: '역산 진단 (Reverse DCF)',
+};
+
+const okItems = (trace) => trace.filter((t) => (t.result || {}).ok && (t.result.value || {}).value !== undefined);
+
+function fmtNum(v, unit) {
+  if (typeof v !== 'number') return String(v ?? '');
+  const abs = Math.abs(v);
+  // 조·억 단위로 접어 읽기 쉽게. 통화가 아닌 %·배는 그대로 둔다.
+  if (['%', '배', '개', ''].includes(unit || '')) return v.toLocaleString('ko-KR');
+  if (abs >= 1e12) return `${(v / 1e12).toLocaleString('ko-KR', { maximumFractionDigits: 2 })}조`;
+  if (abs >= 1e8) return `${(v / 1e8).toLocaleString('ko-KR', { maximumFractionDigits: 1 })}억`;
+  return v.toLocaleString('ko-KR');
+}
+
+/* 값 하나가 답변 본문에 어떤 문자열로 적혔을지 후보를 만든다.
+   맞히려고 넓게 잡지 않는다 — 짧은 숫자는 우연히 일치하기 쉬워 4자 미만은 아예 버린다. */
+function matchStrings(v, unit) {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return [];
+  const out = new Set([
+    v.toLocaleString('ko-KR'),
+    v.toLocaleString('en-US'),
+    String(v),
+  ]);
+  if (!Number.isInteger(v)) {
+    out.add(v.toFixed(2));
+    out.add(v.toFixed(4).replace(/0+$/, '').replace(/\.$/, ''));
+  }
+  if (unit === '%') { out.add(`${v}%`); out.add(`${v.toFixed(2)}%`); }
+  return [...out].filter((s) => s.length >= 4);
+}
+
+function collectFacts(trace) {
+  const facts = [];       // {strings, tier, source, url, as_of, label}
+  const push = (v, toolName) => {
+    const p = v.provenance || {};
+    const strings = matchStrings(v.value, v.unit);
+    if (strings.length) {
+      facts.push({ strings, tier: p.source_type, source: p.source, url: p.source_url,
+                   as_of: p.as_of, label: v.label || toolName });
+    }
+    for (const x of Object.values(v.extras || {})) push(x, toolName);
+  };
+  for (const t of okItems(trace)) push(t.result.value, t.name);
+  return facts;
+}
+
+// 엔진이 붙인 ⚠️ 경고. **LLM 이 옮겨 적었는지와 무관하게** 여기서 직접 꺼내 보여준다 —
+// 옮겨 적기를 프롬프트로 지시해 두었지만, 지시가 지켜졌는지에 신뢰를 걸 이유가 없다.
+function collectWarnings(trace) {
+  const out = [];
+  const scan = (v, toolName) => {
+    const note = (v.provenance || {}).note || '';
+    for (const line of note.split(/(?=⚠️)/)) {
+      const s = line.trim();
+      if (s.startsWith('⚠️') && s.length > 4) out.push({ tool: toolName, text: s.replace(/^⚠️\s*/, '') });
+    }
+    for (const x of Object.values(v.extras || {})) scan(x, toolName);
+  };
+  for (const t of okItems(trace)) scan(t.result.value, t.name);
+  // 같은 경고가 extras 를 타고 중복되기 쉬우므로 문구 기준으로 접는다.
+  const seen = new Set();
+  return out.filter((w) => !seen.has(w.text) && seen.add(w.text));
+}
+
+function collectSources(trace) {
+  const by = new Map();
+  const scan = (v) => {
+    const p = v.provenance || {};
+    if (p.source && !by.has(p.source)) {
+      by.set(p.source, { source: p.source, tier: p.source_type, url: p.source_url, as_of: p.as_of });
+    }
+    for (const x of Object.values(v.extras || {})) scan(x);
+  };
+  for (const t of okItems(trace)) scan(t.result.value);
+  return [...by.values()];
+}
+
+function headerHtml(trace) {
+  const items = okItems(trace);
+  if (!items.length) return '';
+  // 회사명은 도구 인자에서 가장 많이 등장한 것을 쓴다(추론이 아니라 실제로 조회한 대상).
+  const counts = {};
+  for (const t of trace) {
+    const c = (t.input || {}).company;
+    if (c) counts[c] = (counts[c] || 0) + 1;
+  }
+  const company = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+  const methods = [...new Set(trace.map((t) => CALC_METHOD[t.name]).filter(Boolean))];
+  const asOf = items.map((t) => (t.result.value.provenance || {}).as_of).filter(Boolean);
+  if (!company && !methods.length) return '';
+
+  const bits = [];
+  if (company) bits.push(`<span class="k">대상</span><span class="v">${esc(company)}</span>`);
+  if (methods.length) bits.push(`<span class="k">방법</span><span class="v">${esc(methods.join(' · '))}</span>`);
+  if (asOf.length) bits.push(`<span class="k">기준</span><span class="v">${esc([...new Set(asOf)].slice(0, 3).join(', '))}</span>`);
+  bits.push(`<span class="k">조회</span><span class="v">${new Date().toLocaleDateString('ko-KR')}</span>`);
+  return `<div class="ans-head">${bits.join('')}</div>`;
+}
+
+function figuresHtml(trace) {
+  const cards = [];
+  for (const t of okItems(trace)) {
+    const title = HEADLINE[t.name];
+    if (!title) continue;
+    const v = t.result.value;
+    if (v.value === null) continue;   // 봉인된 결과(NM)는 카드로 만들지 않는다
+    cards.push(`<div class="fig"><div class="fig-k">${esc(title)}</div>
+      <div class="fig-v">${esc(fmtNum(v.value, v.unit))}<span class="fig-u">${esc(v.unit || '')}</span></div>
+      <div class="fig-l">${esc(v.label || '')}</div></div>`);
+  }
+  return cards.length ? `<div class="figs">${cards.join('')}</div>` : '';
+}
+
+function warningsHtml(trace) {
+  const ws = collectWarnings(trace);
+  if (!ws.length) return '';
+  return `<details class="warn-banner" open>
+    <summary>⚠️ 검증 경고 ${ws.length}건 — 결론보다 먼저 확인하세요</summary>
+    <ul>${ws.map((w) => `<li><code>${esc(w.tool)}</code> ${esc(w.text)}</li>`).join('')}</ul>
+  </details>`;
+}
+
+function sourcesHtml(trace) {
+  const list = collectSources(trace);
+  if (!list.length) return '';
+  const li = list.map((s, n) => {
+    const [badge] = TIER[s.tier] || ['⚪ ?'];
+    const link = s.url && /^https?:/.test(s.url)
+      ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.source)}</a>`
+      : esc(s.source);
+    return `<li id="src-${n + 1}"><span class="sn">${n + 1}</span>
+      <span class="tier">${badge}</span> ${link}
+      ${s.as_of ? `<span class="asof">${esc(s.as_of)}</span>` : ''}</li>`;
+  }).join('');
+  return `<div class="src-notes"><div class="src-notes-h">출처</div><ol>${li}</ol></div>`;
+}
+
+/* 본문 텍스트에 등장하는 값에 출처 등급 점을 단다.
+   **텍스트 노드만** 만지므로 링크·태그 구조가 깨지지 않고, 값이 문자열로 정확히 일치할 때만
+   붙인다(짐작해서 붙이지 않는다). 그래서 커버리지는 부분적이며, 그게 의도다. */
+function annotateFacts(root, facts) {
+  if (!facts.length) return;
+  const pairs = [];
+  for (const f of facts) for (const s of f.strings) pairs.push([s, f]);
+  pairs.sort((a, b) => b[0].length - a[0].length);   // 긴 문자열 먼저 — 부분일치 방지
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const queue = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (!n.parentElement.closest('a, code, .ans-head, .figs, .src-notes, .warn-banner')) queue.push(n);
+  }
+  const used = new Set();
+  // 큐로 도는 이유: 한 문단에 값이 여러 개 있을 수 있다. 노드를 쪼갠 뒤 남은 뒷부분을
+  // 큐에 다시 넣어야 두 번째 값부터도 잡힌다(그러지 않으면 문단마다 하나만 표시된다).
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node.nodeValue) continue;
+    const hit = pairs.find(([s]) => !used.has(s) && node.nodeValue.includes(s));
+    if (!hit) continue;
+    const [s, f] = hit;
+    used.add(s);
+    const after = node.splitText(node.nodeValue.indexOf(s));
+    const rest = after.splitText(s.length);
+    const [badge, desc] = TIER[f.tier] || ['⚪ ?', ''];
+    const mark = document.createElement('span');
+    mark.className = `fact t-${f.tier || 'unknown'}`;
+    mark.title = `${badge} · ${f.label || ''} · ${f.source || ''}`.trim() + (desc ? `\n${desc}` : '');
+    mark.textContent = after.nodeValue;
+    after.replaceWith(mark);
+    queue.push(rest);
+  }
+}
+
+/* 답변 안의 "(출처: …)" 를 위첨자 번호로 접는다. 아래 출처 목록의 이름과 **앞부분이
+   일치할 때만** 번호를 매기고, 못 찾으면 원문 그대로 둔다 — 틀린 번호를 붙이느니
+   원문이 낫다. */
+function linkCitations(root, sources) {
+  if (!sources.length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (/\(출처\s*:/.test(n.nodeValue) && !n.parentElement.closest('a, code')) nodes.push(n);
+  }
+  const norm = (s) => s.toLowerCase().replace(/[\s()·,]/g, '');
+  for (const node of nodes) {
+    const frag = document.createDocumentFragment();
+    let rest = node.nodeValue;
+    let m;
+    const re = /\(출처\s*:\s*([^)]+)\)/;
+    while ((m = re.exec(rest))) {
+      frag.append(rest.slice(0, m.index));
+      const cited = norm(m[1]);
+      const i = sources.findIndex((s) => cited.startsWith(norm(s.source).slice(0, 6)));
+      if (i >= 0) {
+        const a = document.createElement('a');
+        a.className = 'cite';
+        a.href = `#src-${i + 1}`;
+        a.textContent = String(i + 1);
+        a.title = m[1];
+        frag.append(a);
+      } else {
+        frag.append(m[0]);       // 매칭 실패 → 원문 유지
+      }
+      rest = rest.slice(m.index + m[0].length);
+    }
+    frag.append(rest);
+    node.replaceWith(frag);
+  }
+}
+
+function decorateAnswers() {
+  for (const el of document.querySelectorAll('.msg.assistant[data-idx]')) {
+    if (el.dataset.decorated) continue;
+    const m = state.messages[Number(el.dataset.idx)];
+    const trace = (m && m.trace) || [];
+    if (!trace.length) { el.dataset.decorated = '1'; continue; }
+    const md = el.querySelector('.md');
+    if (!md) continue;
+
+    md.insertAdjacentHTML('beforebegin', headerHtml(trace) + warningsHtml(trace) + figuresHtml(trace));
+    md.insertAdjacentHTML('afterend', sourcesHtml(trace));
+    annotateFacts(md, collectFacts(trace));
+    linkCitations(md, collectSources(trace));
+    el.dataset.decorated = '1';
+  }
+}
+
 function renderChat() {
   $('caps').hidden = state.messages.length > 0;
   $('chat').innerHTML = state.messages.map(messageHtml).join('');
+  decorateAnswers();
   wireExports();
+  wireCopy();
   wireDecisions();
   scrollToEnd();
 }
@@ -540,6 +823,55 @@ function wireDecisions() {
   };
 
   refresh();
+}
+
+/* ── 복사 ────────────────────────────────────────────────
+ * 답변은 원문 마크다운으로, 표는 TSV 로 준다 — 엑셀에 붙여넣으면 셀이 그대로 나뉘어야
+ * 쓸모가 있고, HTML 을 복사하면 서식만 딸려오고 셀은 안 나뉜다. */
+async function copyText(text, btn) {
+  const prev = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✓ 복사됨';
+  } catch (_) {
+    // clipboard API 는 비보안 컨텍스트(http)나 권한 거부 시 실패한다 → 구식 경로로 대체
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    btn.textContent = document.execCommand('copy') ? '✓ 복사됨' : '복사 실패';
+    ta.remove();
+  }
+  setTimeout(() => { btn.textContent = prev; }, 1400);
+}
+
+function tableToTsv(table) {
+  return [...table.rows]
+    .map((r) => [...r.cells].map((c) => c.innerText.replace(/\s+/g, ' ').trim()).join('\t'))
+    .join('\n');
+}
+
+function wireCopy() {
+  for (const b of document.querySelectorAll('[data-copy="answer"]')) {
+    b.onclick = () => {
+      const m = state.messages[Number(b.dataset.index)];
+      if (m) copyText(m.content || '', b);
+    };
+  }
+  // 표마다 복사 버튼을 하나씩 얹는다 — 보고서에 옮길 때 필요한 건 대개 표 하나다.
+  for (const wrap of document.querySelectorAll('.md-table-wrap')) {
+    if (wrap.dataset.copyWired) continue;
+    wrap.dataset.copyWired = '1';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ghost sm table-copy';
+    btn.textContent = '표 복사';
+    btn.title = '엑셀에 붙여넣을 수 있는 형식(TSV)으로 복사';
+    btn.onclick = () => copyText(tableToTsv(wrap.querySelector('table')), btn);
+    wrap.prepend(btn);
+  }
 }
 
 function wireExports() {
@@ -662,6 +994,7 @@ async function submitQuestion(question) {
   if (!question || state.busy) return;
 
   state.busy = true;
+  stepAt = -1;              // 질문마다 단계를 처음부터
   $('send-btn').disabled = true;
   questionBox.value = '';
   questionBox.style.height = 'auto';
@@ -680,20 +1013,32 @@ async function submitQuestion(question) {
   const live = document.createElement('div');
   live.className = 'msg assistant';
   live.innerHTML = `<div class="avatar">A</div><div class="body">
-    <details class="trace" open><summary><span class="spinner"></span> 데이터 소스 조회 중…</summary>
+    <div class="steps" id="live-steps">${STEPS.map((s, n) =>
+      `<span class="step" data-step="${n}"><i>${n + 1}</i>${esc(s.label)}</span>`).join('')}</div>
+    <details class="trace" open><summary><span class="spinner"></span> 데이터 소스 조회 중…
+      <button type="button" class="ghost sm cancel-btn" id="cancel-btn">중단</button></summary>
     <div class="trace-body" id="live-trace"></div></details></div>`;
   $('chat').appendChild(live);
   scrollToEnd();
   const liveBody = $('live-trace');
+  markStep(0);
 
   const append = (html) => {
     liveBody.insertAdjacentHTML('beforeend', html);
     scrollToEnd();
   };
 
+  // 긴 조사를 사용자가 끊을 수 있어야 한다. AbortController 로 스트림을 끊으면
+  // 서버는 이미 받은 질문을 계속 처리하지만, 화면은 즉시 돌려준다.
+  const ctrl = new AbortController();
+  state.abort = ctrl;
+  let cancelled = false;
+  $('cancel-btn').onclick = () => { cancelled = true; ctrl.abort(); };
+
   try {
     const res = await fetch('/api/ask', {
       method: 'POST',
+      signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         question, session_id: state.sessionId,
@@ -730,6 +1075,7 @@ async function submitQuestion(question) {
           serverAccepted = true;      // 여기부터는 서버 세션에 기록된다
           state.sessionId = ev.session_id;
         } else if (ev.type === 'tool_use') {
+          markStep(stepOf(ev.name));
           append(`<div class="trace-live">🔧 호출: ${esc(ev.name)}(${esc(fmtArgs(ev.input))})</div>`);
         } else if (ev.type === 'progress') {
           append(`<div class="trace-live">🔧 ${esc(ev.text)}</div>`);
@@ -738,6 +1084,7 @@ async function submitQuestion(question) {
         } else if (ev.type === 'error') {
           append(`<div class="trace-item err">${esc(ev.text)}</div>`);
         } else if (ev.type === 'final') {
+          markStep(STEPS.length - 1);
           state.messages.push({
             role: 'assistant', content: ev.text, html: ev.html, trace: ev.trace || [],
           });
@@ -749,7 +1096,14 @@ async function submitQuestion(question) {
       }
     }
   } catch (err) {
-    if (serverAccepted) {
+    if (cancelled) {
+      // 사용자가 끊은 것은 오류가 아니다. 다만 서버가 이미 질문을 받았다면 그 턴은
+      // 서버 세션에 저장되므로, 화면에도 '중단됨' 을 남겨 기록과 어긋나지 않게 한다.
+      state.messages.push({
+        role: 'assistant', content: '⏹ 사용자가 중단했습니다.',
+        html: '<p>⏹ 사용자가 중단했습니다.</p>', trace: [],
+      });
+    } else if (serverAccepted) {
       // 서버는 받았고 처리 중에 끊긴 경우 — 질문은 세션에 남아 있으니 되돌리지 않는다.
       // 여기서 입력창에 원문을 복원하면 사용자가 같은 질문을 두 번 보내게 된다.
       state.messages.push({

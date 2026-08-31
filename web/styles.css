@@ -400,6 +400,80 @@ button:disabled { opacity: .5; cursor: default; }
 .md th { background: var(--panel-2); font-weight: 600; }
 .md tbody tr:nth-child(even) { background: var(--zebra); }
 
+/* 진행 단계 — 도구가 흘러가기만 하면 어디까지 왔는지 알 수 없다. */
+.steps { display: flex; flex-wrap: wrap; gap: .3rem .5rem; margin: 0 0 .55rem; font-size: .74rem; }
+.step { display: inline-flex; align-items: center; gap: .3rem; color: var(--text-mute);
+        border: 1px solid var(--line); border-radius: 999px; padding: .1rem .55rem .1rem .2rem; }
+.step i { display: inline-flex; align-items: center; justify-content: center;
+          width: 1.05rem; height: 1.05rem; border-radius: 50%; font-style: normal;
+          font-size: .64rem; background: var(--line); color: var(--text-mute); }
+.step.done { color: var(--text-dim); border-color: var(--ok-line); }
+.step.done i { background: var(--ok-fg); color: var(--bg); }
+.step.at { color: var(--amber); border-color: var(--accent-line); background: var(--accent-bg); }
+.step.at i { background: var(--amber); color: var(--on-accent); }
+
+.cancel-btn { margin-left: auto; }
+.trace > summary { display: flex; align-items: center; gap: .4rem; }
+
+/* 표 복사 — 표 위에 겹쳐두고 표에 마우스를 올렸을 때만 드러낸다. */
+.md-table-wrap { position: relative; }
+.table-copy { position: absolute; top: .25rem; right: .35rem; z-index: 3;
+              opacity: 0; transition: opacity .12s; }
+.md-table-wrap:hover .table-copy, .table-copy:focus { opacity: 1; }
+@media (hover: none) { .table-copy { opacity: 1; } }   /* 터치 기기는 hover 가 없다 */
+
+/* ── 답변 헤더 · 핵심수치 · 경고 · 출처 ─────────────────
+   전부 trace 에서 만든 블록이다(app.js 의 decorateAnswers 참고). */
+.ans-head { display: flex; flex-wrap: wrap; gap: .3rem 1.1rem; align-items: baseline;
+            padding: .5rem .7rem; margin: 0 0 .7rem; border-radius: 6px;
+            background: var(--panel); border: 1px solid var(--line); font-size: .8rem; }
+.ans-head .k { color: var(--text-mute); letter-spacing: .08em; text-transform: uppercase;
+               font-size: .68rem; margin-right: .35rem; }
+.ans-head .v { color: var(--text); font-weight: 600; }
+
+.figs { display: flex; flex-wrap: wrap; gap: .6rem; margin: 0 0 .9rem; }
+.fig { flex: 1 1 11rem; min-width: 10rem; padding: .6rem .75rem; border-radius: var(--radius);
+       background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--amber); }
+.fig-k { font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; color: var(--text-mute); }
+.fig-v { font-size: 1.5rem; font-weight: 650; color: var(--text); line-height: 1.25;
+         margin-top: .15rem; font-variant-numeric: tabular-nums; }
+.fig-u { font-size: .8rem; font-weight: 500; color: var(--text-mute); margin-left: .25rem; }
+.fig-l { font-size: .7rem; color: var(--text-mute); margin-top: .2rem;
+         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.warn-banner { margin: 0 0 .9rem; border-radius: var(--radius);
+               background: var(--bad-bg); border: 1px solid var(--bad-line); }
+.warn-banner > summary { cursor: pointer; padding: .5rem .75rem; font-size: .84rem;
+                         font-weight: 600; color: var(--bad-fg); list-style: none; }
+.warn-banner > summary::-webkit-details-marker { display: none; }
+.warn-banner > summary::before { content: '▸ '; }
+.warn-banner[open] > summary::before { content: '▾ '; }
+.warn-banner ul { margin: 0; padding: 0 .9rem .7rem 2rem; }
+.warn-banner li { font-size: .82rem; color: var(--text-dim); line-height: 1.6; margin: .3rem 0; }
+
+.src-notes { margin: 1rem 0 .2rem; border-top: 1px solid var(--line); padding-top: .6rem; }
+.src-notes-h { font-size: .68rem; letter-spacing: .16em; text-transform: uppercase;
+               color: var(--text-mute); margin-bottom: .35rem; }
+.src-notes ol { list-style: none; margin: 0; padding: 0; }
+.src-notes li { display: flex; align-items: baseline; gap: .4rem; font-size: .78rem;
+                color: var(--text-mute); line-height: 1.8; }
+.src-notes .sn { min-width: 1.1rem; color: var(--amber); font-variant-numeric: tabular-nums; }
+.src-notes .asof { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* 본문 숫자에 붙는 출처 등급 표시 — 값 자체는 그대로 두고 밑줄 색으로만 알린다. */
+.md .fact { border-bottom: 2px solid var(--line-strong); cursor: help; }
+.md .fact.t-authoritative, .md .fact.t-parsed_authoritative { border-bottom-color: var(--green); }
+.md .fact.t-reference { border-bottom-color: var(--blue); }
+.md .fact.t-computed { border-bottom-color: var(--purple); }
+.md .fact.t-assumption { border-bottom-color: var(--amber); }
+.md .fact.t-llm_estimate { border-bottom-color: var(--red); }
+
+.md a.cite { display: inline-block; font-size: .68em; vertical-align: super; line-height: 1;
+             min-width: 1em; text-align: center; color: var(--amber); text-decoration: none;
+             border: 1px solid var(--accent-line); border-radius: 3px; padding: 0 .2em;
+             margin-left: .1em; }
+.md a.cite:hover { background: var(--accent-bg); text-decoration: none; }
+
 /* 수치 열 — 자릿수가 세로로 맞아야 크기 비교가 눈으로 된다.
    tabular-nums 가 없으면 폰트가 1 을 좁게 그려서 같은 자릿수도 어긋난다. */
 .md th.num, .md td.num { text-align: right; font-variant-numeric: tabular-nums;
