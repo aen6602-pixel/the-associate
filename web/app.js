@@ -544,6 +544,31 @@ composer.addEventListener('submit', (e) => {
   if (question) submitQuestion(question);
 });
 
+/* ── 사용 방법 가이드 ────────────────────────────────── */
+function openHelp() { $('help-modal').hidden = false; }
+function closeHelp() { $('help-modal').hidden = true; }
+
+$('help-btn').addEventListener('click', openHelp);
+$('help-close').addEventListener('click', closeHelp);
+// 배경(모달 바깥)을 누르면 닫는다 — 상자 안쪽 클릭은 통과시키지 않는다.
+$('help-modal').addEventListener('click', (e) => {
+  if (e.target === $('help-modal')) closeHelp();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('help-modal').hidden) closeHelp();
+});
+
+// 예시 질문을 누르면 입력창에 넣고 닫는다. 바로 전송하지 않는 것은 의도적이다 —
+// 회사명을 자기 것으로 바꿔 보내는 경우가 대부분이라 손댈 여지를 남긴다.
+document.querySelectorAll('.ask-ex').forEach((b) => {
+  b.addEventListener('click', () => {
+    closeHelp();
+    questionBox.value = b.dataset.ask || '';
+    questionBox.focus();
+    questionBox.dispatchEvent(new Event('input'));  // 자동 높이 조절을 태운다
+  });
+});
+
 async function submitQuestion(question) {
   if (!question || state.busy) return;
 

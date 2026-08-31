@@ -122,7 +122,8 @@
   <main class="main">
     <button class="ghost sm sidebar-toggle" id="sidebar-toggle" title="사이드바">☰</button>
     <div class="content">
-      <h1>The Associate<span class="by">Developed by Martin Lee</span></h1>
+      <h1>The Associate<span class="by">Developed by Martin Lee</span>
+        <button type="button" class="ghost sm help-btn" id="help-btn">사용 방법</button></h1>
       <p class="lede">Your AI valuation associate — the work an investment bank or accounting
         firm would run, on demand.</p>
       <p class="lede">Every figure traces back to a public source. No fabricated numbers,
@@ -160,6 +161,129 @@
       <button type="submit" class="primary" id="send-btn" title="보내기 (Enter)">↑</button>
     </form>
   </main>
+</div>
+
+<!-- 사용 방법 (팀 온보딩) -->
+<div class="modal" id="help-modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">The Associate 사용 방법</div>
+        <div class="hint">공시 원문에서 직접 숫자를 가져와, 출처가 끝까지 추적되는 분석을 만듭니다.</div>
+      </div>
+      <button class="ghost sm" id="help-close" title="닫기 (Esc)">✕</button>
+    </div>
+    <div class="modal-body guide">
+
+      <section>
+        <h3>이게 뭔가요</h3>
+        <p>애널리스트·회계법인 Associate가 하는 <strong>실행 업무</strong>를 대신합니다 —
+          공시를 뒤지고, 숫자를 모으고, 계산하고, 표로 정리하는 일입니다.
+          <strong>판단은 사람이 합니다.</strong> 어떤 회사를 어떤 방법으로 볼지, 그 성장 스토리를
+          믿을지는 여전히 당신 몫이고, 이 도구는 그 판단에 쓸 근거를 만들어 줍니다.</p>
+        <ul class="pillars">
+          <li><strong>숫자를 지어내지 않습니다.</strong> 모든 값은 DART·SEC·EDINET 같은 공개
+            소스에서 가져오고, 못 찾으면 채우는 대신 “못 찾았다”고 말합니다.</li>
+          <li><strong>출처가 끝까지 붙어 다닙니다.</strong> 값마다 출처·기준일·등급이 따라오고,
+            링크를 누르면 원문으로 갑니다.</li>
+          <li><strong>성립하지 않는 평가는 거절합니다.</strong> 이건 고장이 아니라 기능입니다(아래 참고).</li>
+        </ul>
+      </section>
+
+      <section>
+        <h3>이렇게 물어보세요</h3>
+        <p class="hint">아래 예시를 누르면 입력창에 들어갑니다. 회사명만 바꿔 쓰시면 됩니다.</p>
+
+        <div class="ex-group">
+          <div class="ex-label">데이터 조회</div>
+          <button class="ask-ex" data-ask="삼성전자 최근 3개년 매출액과 영업이익">삼성전자 최근 3개년 매출액과 영업이익</button>
+          <button class="ask-ex" data-ask="리노공업 WACC 계산해줘">리노공업 WACC 계산해줘</button>
+          <button class="ask-ex" data-ask="한국 ERP와 10년 국고채 금리 알려줘">한국 ERP와 10년 국고채 금리</button>
+        </div>
+
+        <div class="ex-group">
+          <div class="ex-label">밸류에이션</div>
+          <button class="ask-ex" data-ask="SK하이닉스 DCF 돌려줘">SK하이닉스 DCF 돌려줘</button>
+          <button class="ask-ex" data-ask="기아 시나리오 분석해줘 (Base/Bull/Bear)">기아 시나리오 분석 (Base/Bull/Bear)</button>
+          <button class="ask-ex" data-ask="삼성전자, TSMC, 마이크론, 키옥시아 EV/EBITDA 비교표 만들어줘">삼성전자·TSMC·마이크론·키옥시아 비교표 <span class="tagx">크로스보더</span></button>
+          <button class="ask-ex" data-ask="비상장사 상증법 주당 평가액 계산해줘">상증법 주당 평가액</button>
+        </div>
+
+        <div class="ex-group">
+          <div class="ex-label">검증 · 방어</div>
+          <button class="ask-ex" data-ask="증권사 목표주가가 19만원인데, 이 가격이 나오려면 어떤 가정이 필요한지 역산해줘">목표주가 역산 — “이 가격이 나오려면 뭘 믿어야 하나” <span class="tagx">추천</span></button>
+          <button class="ask-ex" data-ask="방금 만든 DCF의 가정들이 서로 모순되지 않는지 점검해줘">내 가정이 서로 모순되지 않는지 점검</button>
+        </div>
+
+        <div class="ex-group">
+          <div class="ex-label">조사 (자체 공시가 없는 회사)</div>
+          <button class="ask-ex" data-ask="ESSENCORE 매출을 SK그룹 계열사 공시 원문에서 찾아줘">비상장 계열사 실적을 지주사 공시 원문에서 찾기</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>결과 읽는 법</h3>
+        <p><strong>숫자보다 등급을 먼저 보세요.</strong> 값마다 출처 등급이 붙습니다.</p>
+        <ul class="tiers">
+          <li><span class="t">🟢 공식</span> 정부·규제기관·거래소 (그대로 신뢰)</li>
+          <li><span class="t">🟢 원문</span> 공시 원문에서 직접 읽음 — 문서ID·인용 있음 (추정 아님)</li>
+          <li><span class="t">🔵 참조</span> 업계 표준 데이터셋(Damodaran 등)</li>
+          <li><span class="t">🟣 계산</span> 엔진이 계산한 파생값</li>
+          <li><span class="t">🟠 가정</span> 사용자가 준 가정</li>
+          <li><span class="t">🔴 LLM추정</span> <strong>소스 없음 — 반드시 검증하세요</strong></li>
+        </ul>
+        <ul>
+          <li>답변 위의 <strong>🔍 사용한 데이터 소스</strong>를 펼치면 어떤 API를 어떤 인자로 불러
+            무슨 값을 받았는지 전부 보이고, 원문 링크로 바로 갈 수 있습니다.</li>
+          <li><strong>⚠️ 경고는 지우지 말고 보고서에 그대로 옮기세요.</strong> 기준기간 혼용·결산월
+            차이·회계기준 차이 같은 것들이며, 그게 그 표의 신뢰구간입니다.</li>
+          <li><code>NM</code>은 “해석 불가”, <code>미확보</code>는 “못 구함(사유 명시)”입니다.
+            둘 다 0이 아닙니다.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h3>잘 쓰는 법</h3>
+        <ul>
+          <li><strong>세션은 회사 단위로.</strong> 한 대화 안에서 검증한 값은 계속 유지됩니다.
+            회사를 바꿀 땐 New session을 누르세요.</li>
+          <li><strong>연도를 지정하지 마세요.</strong> 최신 회계연도를 알아서 찾습니다.
+            직접 넣으면 오히려 옛날 데이터가 나옵니다.</li>
+          <li><strong>해외 기업은 시장을 붙여서.</strong> <code>MU:US</code>, <code>7203:JP</code>,
+            <code>2330:TW</code> 처럼 쓰면 한 표에 섞어 비교할 수 있습니다.</li>
+          <li><strong>추론 강도</strong>는 단순 조회면 낮게, DCF·비교표면 높게(사이드바 Engine).</li>
+          <li>선택지 카드가 뜨면 눌러서 답하세요. 자유롭게 문장으로 답해도 됩니다.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h3>못 하는 것 (중요)</h3>
+        <ul>
+          <li><strong>1차 조사</strong> — 경영진 미팅, 채널 체크, 전문가 네트워크는 못 합니다.</li>
+          <li><strong>유료 데이터</strong> — Capital IQ·Bloomberg 컨센서스, <strong>거래사례(transaction comps)</strong>,
+            forward multiple은 없습니다.</li>
+          <li><strong>LBO·딜 구조 모델링</strong>은 다루지 않습니다.</li>
+          <li><strong>스토리를 만들지 못합니다</strong> — “왜 이 회사가 이 배수를 받아야 하는가”는 사람 몫입니다.</li>
+          <li><strong>커버리지 차이</strong> — 한국(공시 원문까지) ≫ 미국 &gt; 일본(핵심 6개 항목) &gt; 대만(2차 출처).</li>
+        </ul>
+      </section>
+
+      <section>
+        <h3>거절할 때가 있습니다 — 고장이 아닙니다</h3>
+        <p>마감에 쫓겨 저지르기 쉬운 실수를 막도록 만들어져 있습니다.</p>
+        <ul>
+          <li><strong>목표주가에 맞춘 기본안은 만들지 않습니다.</strong> 대신 “그 가격은 매출성장률
+            43.9%를 요구하는데 과거 최고가 23.9%”처럼 역산해서 알려줍니다 — IC에서 더 쓸모 있는 형태입니다.</li>
+          <li><strong>캡티브 금융이 섞인 회사</strong>(현대차·기아류)는 단일 DCF를 막고 SOTP로 안내합니다.</li>
+          <li><strong>계산이 성립하지 않으면</strong> 주당가치를 만들어내지 않고 <code>NM</code>과 사유를 냅니다.</li>
+        </ul>
+        <p class="hint">정식 산출물이 필요하면 “가치평가 보고서 써줘”처럼 요청하세요 —
+          승인 단계를 거치는 절차서를 따릅니다. 그냥 물어보면 바로 계산해서 답합니다.</p>
+      </section>
+
+      <p class="guide-foot">데이터 소스 현황과 두뇌(모델·추론 강도) 설정은 왼쪽 사이드바에 있습니다.</p>
+    </div>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>
