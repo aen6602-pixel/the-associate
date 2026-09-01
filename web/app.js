@@ -147,9 +147,13 @@ function renderEngine() {
   const eng = state.engines.find((e) => e.provider === state.provider);
   if (!eng) return;
 
+  // 요약줄은 두 단으로 — 첫 줄은 "Engine: 제공사" 까지만, 상세(모델·추론 강도)는 한 칸
+  // 띄워 아래 줄에. 한 줄에 다 붙이면 사이드바 폭에서 문장이 중간에 끊긴다.
   const effortTag = state.reasoning ? ` · 추론 ${state.reasoning}` : '';
-  $('engine-summary').textContent =
-    `🧠 Engine: ${eng.label} · ${state.model}${effortTag}  ${eng.connected ? '✅' : '⬜'}`;
+  $('engine-summary').innerHTML =
+    `<span class="eng-head"><span>🧠 Engine: ${esc(eng.label)}</span>`
+    + `<span>${eng.connected ? '✅' : '⬜'}</span></span>`
+    + `<span class="eng-sub">${esc((state.model || '모델 미지정') + effortTag)}</span>`;
   $('engine-box').open = !eng.connected;
 
   const ps = $('provider-select');

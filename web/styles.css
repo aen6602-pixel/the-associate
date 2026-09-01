@@ -68,7 +68,11 @@
 
 * { box-sizing: border-box; }
 
-html, body {
+html, /* 한글은 기본값(word-break: normal)이면 글자 사이 어디서나 줄이 끊겨 단어와 의미가
+   갈라진다. keep-all 로 공백에서만 끊고, 그래도 넘치는 긴 토큰(URL 등)만 break-word 로
+   흘린다. */
+body {
+  word-break: keep-all; overflow-wrap: break-word;
   margin: 0; padding: 0; height: 100%;
   background: var(--bg); color: var(--text);
   font-family: var(--font); font-size: 15px; line-height: 1.6;
@@ -196,10 +200,6 @@ button:disabled { opacity: .5; cursor: default; }
        color: var(--text-mute); margin: .8rem 0 .5rem; }
 .divider { height: 1px; background: var(--line); margin: 1.1rem 0; }
 .hint { color: var(--text-mute); font-size: .76rem; margin: .35rem 0 .6rem; line-height: 1.5; }
-/* 등급 범례 — 한 줄로 읽히게. 폭이 모자라면 접히지 말고 가로로 밀리게 둔다. */
-.legend { margin-top: .8rem; font-size: .68rem; white-space: nowrap;
-          overflow-x: auto; scrollbar-width: none; }
-.legend::-webkit-scrollbar { display: none; }
 .warn { color: var(--warn-fg); font-size: .78rem; margin: .5rem 0; }
 .warn.box { background: var(--accent-bg); border: 1px solid var(--warn-line); border-radius: var(--radius);
             padding: .7rem .85rem; font-size: .88rem; }
@@ -232,8 +232,12 @@ button:disabled { opacity: .5; cursor: default; }
 /* 엔진 선택 */
 .engine { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
           margin-bottom: .8rem; }
-.engine > summary { cursor: pointer; padding: .55rem .7rem; font-size: .82rem; list-style: none; }
+.engine > summary { cursor: pointer; padding: .55rem .7rem; font-size: .82rem; list-style: none;
+                    display: block; }
 .engine > summary::-webkit-details-marker { display: none; }
+/* 첫 줄 = [🧠 Engine: 제공사] ……… [연결 표시], 둘째 줄 = 모델·추론 강도 */
+.eng-head { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; }
+.eng-sub { display: block; margin-top: .45rem; font-size: .76rem; color: var(--text-mute); }
 .engine-body { padding: 0 .7rem .7rem; display: flex; flex-direction: column; gap: .5rem; }
 .engine-body label { display: flex; flex-direction: column; gap: .25rem; font-size: .76rem;
                      color: var(--text-mute); }
@@ -430,7 +434,8 @@ button:disabled { opacity: .5; cursor: default; }
 .muse-link:hover { border-color: var(--info-fg); color: var(--text); }
 .muse-link b { color: var(--info-fg); font-weight: 600; }
 .muse-link .tip {
-  position: absolute; left: 0; right: 0; top: calc(100% + .25rem); z-index: 4;
+  position: absolute; left: 0; top: calc(100% + .5rem); z-index: 4;
+  width: max-content; max-width: 100%;
   background: var(--panel); border: 1px solid var(--line-strong); border-radius: 6px;
   padding: .35rem .5rem; font-size: .74rem; color: var(--text-dim); line-height: 1.4;
   box-shadow: 0 6px 18px rgba(0, 0, 0, .28);
@@ -593,6 +598,9 @@ button:disabled { opacity: .5; cursor: default; }
 .modal-title { font-weight: 600; }
 .modal-body { overflow-y: auto; padding: 1.1rem; display: flex; flex-direction: column;
               gap: 1.2rem; }
+
+/* 코드·링크는 keep-all 예외 — 긴 토큰이 안 끊기면 사이드바 밖으로 넘친다. */
+code, pre, .src-body a, .trace-item code { word-break: break-all; }
 
 /* ── 사용 방법 가이드 ─────────────────────────────────── */
 .guide section { border-top: 1px solid var(--line); padding-top: .9rem; }
