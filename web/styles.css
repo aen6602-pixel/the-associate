@@ -191,9 +191,13 @@ button:disabled { opacity: .5; cursor: default; }
 .sidebar-backdrop { display: none; }
 
 .viewer-row { display: flex; align-items: center; gap: .35rem; margin-bottom: .6rem; }
-/* ID 가 남는 폭을 다 먹고 길면 말줄임 → 오른쪽 버튼들은 항상 제자리에 있는다. */
+/* ID 가 남는 폭을 다 먹고 길면 말줄임 → 오른쪽 버튼들은 항상 제자리에 있는다.
+   누르면 이름을 바꿀 수 있으므로 버튼이지만, 평소엔 라벨처럼 조용히 둔다. */
 .viewer { flex: 1; min-width: 0; color: var(--text-mute); font-size: .82rem; overflow: hidden;
-          text-overflow: ellipsis; white-space: nowrap; }
+          text-overflow: ellipsis; white-space: nowrap;
+          background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+          font-family: inherit; }
+.viewer:hover { color: var(--text-dim); text-decoration: underline; }
 .viewer-row .ghost { flex: 0 0 auto; }
 
 .sec { font-size: .7rem; font-weight: 700; letter-spacing: .2em; text-transform: uppercase;
@@ -601,6 +605,18 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* 코드·링크는 keep-all 예외 — 긴 토큰이 안 끊기면 사이드바 밖으로 넘친다. */
 code, pre, .src-body a, .trace-item code { word-break: break-all; }
+
+/* 이름 확인 모달 — 좁고, 닫기 버튼이 없다(이름을 받는 것이 목적). */
+.modal-box.narrow { width: min(420px, 100%); }
+.member-form { display: flex; flex-direction: column; gap: .8rem; }
+.member-form label { display: flex; flex-direction: column; gap: .3rem; }
+.member-form label span { font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+                          color: var(--text-mute); }
+.member-form input { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+                     padding: .6rem .7rem; font: inherit; font-size: 16px; color: var(--text);
+                     outline: none; }
+.member-form input:focus { border-color: var(--amber); }
+.member-form .hint { margin: 0; }
 
 /* ── 사용 방법 가이드 ─────────────────────────────────── */
 .guide section { border-top: 1px solid var(--line); padding-top: .9rem; }

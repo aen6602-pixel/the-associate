@@ -11,6 +11,8 @@ const $ = (id) => document.getElementById(id);
 const state = {
   sessionId: null,
   messages: [],      // [{role, content, trace, html}]
+  account: '',       // 로그인한 계정 이름
+  member: '',        // 그 계정을 쓰는 본인이 밝힌 이름 (자기신고)
   sessions: [],
   provider: null,
   model: null,
@@ -113,6 +115,52 @@ $('logout-btn').addEventListener('click', async () => {
   location.reload();
 });
 
+/* ── 내 이름 ──────────────────────────────────────────
+ * 한 계정(team 등)을 여러 명이 함께 쓰면 대화기록이 한 폴더에 섞여, 관리자 화면에서
+ * 누가 무엇을 물었는지 구분되지 않는다. 로그인 뒤 한 번 이름을 받아 쿠키에 담고
+ * 질문마다 찍는다. 자기신고이므로 신원 증명이 아니다 — 권한은 계정이 정한다.
+ */
+function setViewerLabel(member) {
+  state.member = member || '';
+  const btn = $('viewer-label');
+  btn.textContent = state.member ? `👤 ${state.member}` : `👤 ${state.account}`;
+  btn.title = state.member
+    ? `${state.member} (${state.account} 계정) — 눌러서 이름 바꾸기`
+    : '눌러서 이름 입력';
+}
+
+function askMemberName() {
+  const modal = $('member-modal');
+  const input = $('member-name');
+  const msg = $('member-msg');
+  msg.hidden = true;
+  input.value = state.member || '';
+  modal.hidden = false;
+  // 모바일에서 키보드가 바로 올라오면 버튼이 가려진다 → 포커스만 준다.
+  setTimeout(() => input.focus(), 50);
+}
+
+$('viewer-label').addEventListener('click', askMemberName);
+
+$('member-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('member-submit');
+  const msg = $('member-msg');
+  const name = $('member-name').value.trim();
+  msg.hidden = true;
+  btn.disabled = true;
+  try {
+    const r = await api('/api/member', { method: 'POST', body: JSON.stringify({ name }) });
+    setViewerLabel(r.member);
+    $('member-modal').hidden = true;
+  } catch (err) {
+    msg.hidden = false;
+    msg.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 /* ── 앱 진입 ─────────────────────────────────────────── */
 async function enterApp() {
   const data = await api('/api/bootstrap');
@@ -120,8 +168,11 @@ async function enterApp() {
   $('shell').hidden = false;
 
   $('viewer-row').hidden = !data.gate;
-  $('viewer-label').textContent = `👤 ${data.viewer.label}`;
+  state.account = data.viewer.label;
+  setViewerLabel(data.viewer.member);
   $('admin-link').hidden = !data.viewer.is_admin;
+  // 계정을 팀이 공유하므로, 아직 이름을 안 밝힌 사람에게 한 번 물어본다.
+  if (data.viewer.needs_member) askMemberName();
   $('ephemeral-warn').hidden = !(data.deploy_mode && !data.persistent_storage);
 
   state.engines = data.engines;

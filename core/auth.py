@@ -27,8 +27,22 @@ COOKIE_NAME = "assoc_session"
 
 
 class Viewer(NamedTuple):
-    key: str      # 세션 파일 격리용 키 (core.history 의 user_key)
-    label: str    # 화면에 보여줄 이름
+    key: str          # 세션 파일 격리용 키 (core.history 의 user_key)
+    label: str        # 로그인한 계정 이름
+    member: str = ""  # 그 계정을 지금 쓰는 사람이 밝힌 본인 이름 (자기신고)
+
+
+# 한 계정(team 등)을 여러 명이 공유하면 대화기록이 전부 한 폴더에 섞여 관리자 화면에서
+# 누가 무엇을 물었는지 구분되지 않는다. 로그인 뒤 한 번 이름을 받아 쿠키에 넣고, 질문마다
+# 그 이름을 찍는다. **자기신고이므로 신원 증명이 아니다** — 감사(audit)가 아니라 팀 안에서
+# 서로 알아보기 위한 표시다. 권한은 여전히 계정(label)이 정한다.
+MEMBER_MAX = 24
+
+
+def clean_member(name: str) -> str:
+    """자기신고 이름 정규화. 빈 값이면 "" (호출부가 거절한다)."""
+    v = " ".join(str(name or "").split())
+    return v[:MEMBER_MAX]
 
 
 LOCAL_VIEWER = Viewer(key="local", label="local")
@@ -151,8 +165,10 @@ def _b64d(s: str) -> bytes:
 def issue_token(v: Viewer, now: float | None = None) -> str:
     """`payload.signature` — 서버만 서명할 수 있으므로 위조 불가(내용 자체는 비밀이 아니다)."""
     exp = int((now if now is not None else time.time()) + ttl_seconds())
-    payload = _b64e(json.dumps({"k": v.key, "l": v.label, "e": exp},
-                               separators=(",", ":")).encode("utf-8"))
+    data = {"k": v.key, "l": v.label, "e": exp}
+    if v.member:
+        data["m"] = v.member
+    payload = _b64e(json.dumps(data, separators=(",", ":")).encode("utf-8"))
     sig = _b64e(hmac.new(_secret(), payload.encode("ascii"), hashlib.sha256).digest())
     return f"{payload}.{sig}"
 
@@ -168,6 +184,7 @@ def parse_token(token: str | None, now: float | None = None) -> Viewer | None:
     try:
         data = json.loads(_b64d(payload))
         key, label, exp = str(data["k"]), str(data["l"]), int(data["e"])
+        member = clean_member(data.get("m", ""))
     except (ValueError, KeyError, TypeError):
         return None
     if (now if now is not None else time.time()) > exp:
@@ -176,4 +193,4 @@ def parse_token(token: str | None, now: float | None = None) -> Viewer | None:
     table = users()
     if table and label != "member" and label not in table:
         return None
-    return Viewer(key=key, label=label)
+    return Viewer(key=key, label=label, member=member)

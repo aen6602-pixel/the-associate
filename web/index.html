@@ -82,7 +82,7 @@
 <div class="shell" id="shell" hidden>
   <aside class="sidebar" id="sidebar">
     <div class="viewer-row" id="viewer-row" hidden>
-      <span class="viewer" id="viewer-label"></span>
+      <button class="viewer" id="viewer-label" title="이름 바꾸기"></button>
       <button class="ghost sm" id="logout-btn" title="로그아웃">Log out</button>
       <a class="ghost sm" id="admin-link" href="/admin" title="관리자 페이지" hidden>Admin</a>
       <button class="ghost sm" id="theme-btn" title="밝게/어둡게">◐</button>
@@ -185,6 +185,31 @@
       <button type="submit" class="primary" id="send-btn" title="보내기 (Enter)">↑</button>
     </form>
   </main>
+</div>
+
+<!-- 이름 확인 — 한 계정을 여러 명이 함께 쓰므로, 들어온 사람이 누구인지 한 번 받는다. -->
+<div class="modal" id="member-modal" hidden>
+  <div class="modal-box narrow">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">누구신가요?</div>
+        <div class="hint">이 계정은 팀이 함께 씁니다. 이름을 남기면 내가 한 질문을 나중에
+          구분할 수 있습니다.</div>
+      </div>
+    </div>
+    <div class="modal-body">
+      <form id="member-form" class="member-form">
+        <label><span>이름</span>
+          <input type="text" id="member-name" maxlength="24" autocomplete="name"
+                 placeholder="예: 이상화" spellcheck="false" required>
+        </label>
+        <p class="warn" id="member-msg" hidden></p>
+        <button type="submit" class="primary" id="member-submit">시작하기</button>
+        <p class="hint">관리자 화면에 질문한 사람으로 표시됩니다. 사이드바의 이름을 눌러
+          언제든 바꿀 수 있습니다.</p>
+      </form>
+    </div>
+  </div>
 </div>
 
 <!-- 사용 방법 (팀 온보딩) -->

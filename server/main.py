@@ -86,6 +86,14 @@ class LoginBody(BaseModel):
     password: str = ""
 
 
+def _set_session_cookie(response: Response, request: Request, v: auth.Viewer) -> None:
+    response.set_cookie(
+        auth.COOKIE_NAME, auth.issue_token(v),
+        max_age=auth.ttl_seconds(), httponly=True, samesite="lax",
+        secure=_secure_cookies(request), path="/",
+    )
+
+
 @app.post("/api/login")
 def login(body: LoginBody, request: Request, response: Response) -> dict:
     if not auth.is_configured():
@@ -97,12 +105,25 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
         time.sleep(1)  # 무차별 대입 속도 제한
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="이름 또는 비밀번호가 올바르지 않습니다.")
-    response.set_cookie(
-        auth.COOKIE_NAME, auth.issue_token(v),
-        max_age=auth.ttl_seconds(), httponly=True, samesite="lax",
-        secure=_secure_cookies(request), path="/",
-    )
+    _set_session_cookie(response, request, v)
     return {"authenticated": True, "label": v.label, "gate": True}
+
+
+class MemberBody(BaseModel):
+    name: str = ""
+
+
+@app.post("/api/member")
+def set_member(body: MemberBody, request: Request, response: Response,
+               viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    """공용 계정을 쓰는 사람이 **본인 이름을 밝힌다.** 쿠키를 다시 발급할 뿐 계정·권한은
+    그대로다. 자기신고이므로 신원 증명이 아니고, 팀 안에서 서로 알아보기 위한 표시다."""
+    name = auth.clean_member(body.name)
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="이름을 2글자 이상 입력해 주세요.")
+    v = viewer._replace(member=name)
+    _set_session_cookie(response, request, v)
+    return {"member": v.member, "label": v.label}
 
 
 @app.post("/api/logout")
@@ -125,6 +146,7 @@ def me(request: Request) -> dict:
     v = auth.parse_token(request.cookies.get(auth.COOKIE_NAME))
     return {"authenticated": v is not None, "gate": True, "blocked": False,
             "label": v.label if v else None, "needs_name": auth.needs_name(), "message": None,
+            "member": v.member if v else None,
             "is_admin": auth.is_admin(v) if v else False}
 
 
@@ -155,7 +177,11 @@ def bootstrap(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
         }
 
     return {
-        "viewer": {"label": viewer.label, "is_admin": auth.is_admin(viewer)},
+        # needs_member: 아직 본인 이름을 안 밝힌 사람 → 앱이 팝업으로 한 번 물어본다.
+        # 게이트가 없는 로컬 개발에서는 물어볼 이유가 없다.
+        "viewer": {"label": viewer.label, "is_admin": auth.is_admin(viewer),
+                   "member": viewer.member,
+                   "needs_member": bool(auth.is_configured() and not viewer.member)},
         "gate": auth.is_configured(),
         "deploy_mode": config.DEPLOY_MODE,
         "persistent_storage": paths.IS_PERSISTENT,
@@ -269,8 +295,11 @@ def ask(body: AskBody, viewer: auth.Viewer = Depends(current_viewer)) -> Streami
             final_text = f"⚠️ 처리 중 오류가 발생했습니다: {e}"
             yield _sse({"type": "error", "text": str(e)})
 
+        # 질문에 **그때 밝힌 이름**을 찍는다. 나중에 이름을 바꿔도 과거 기록의 작성자는
+        # 그대로 남아야 하므로 세션이 아니라 메시지에 붙인다.
+        asked_by = viewer.member or viewer.label
         messages = prior + [
-            {"role": "user", "content": question},
+            {"role": "user", "content": question, "by": asked_by},
             {"role": "assistant", "content": final_text, "trace": trace},
         ]
         hist.save_session(sid, messages, viewer.key)
