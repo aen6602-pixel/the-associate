@@ -250,6 +250,146 @@ def industry_beta(industry: str, country: str = "KR", de_ratio: float | None = N
     )
 
 
+# Peer 베타를 세울 수 있는 최소 표본. 2개짜리 "평균" 은 평균이 아니라 우연이다.
+PEER_MIN = 3
+PEER_THIN = 5     # 이 아래면 표본이 얇다고 경고를 붙인다
+
+
+def _median(xs: list[float]) -> float:
+    ys = sorted(xs)
+    n = len(ys)
+    return ys[n // 2] if n % 2 else (ys[n // 2 - 1] + ys[n // 2]) / 2
+
+
+def _de_ratio_of(company: str, market: str) -> float:
+    """그 회사의 시장가치 기준 D/E. D/(D+E) 를 구해 D/E 로 바꾼다."""
+    from engines import wacc as wacc_engine     # 순환 import 회피 — 호출 시점에만 필요
+
+    if market != "KR":
+        raise DataError(f"{company}: 국내(KR) 종목만 자본구조를 자동으로 뽑을 수 있습니다.")
+    dv = wacc_engine.market_debt_to_value(company).value
+    if not 0 <= dv < 1:
+        raise DataError(f"{company}: D/(D+E) {dv} 가 범위를 벗어나 D/E 로 바꿀 수 없습니다.")
+    return dv / (1 - dv)
+
+
+def peer_beta(peers: list[str], country: str = "KR", market: str | None = None,
+              target_company: str | None = None, target_de_ratio: float | None = None,
+              tax_rate_pct: float | None = None, index: str = "KOSPI",
+              symbols: dict | None = None) -> Value:
+    """**Bottom-up 베타** — 상장 Peer 들의 회귀베타를 각자의 자본구조로 무차입화한 뒤,
+    그 중앙값을 대상회사의 목표 자본구조로 재레버리지한다.
+
+    Damodaran 산업베타가 "이 산업 전체" 라면, 이쪽은 "내가 고른 이 회사들" 이다. 산업 분류가
+    실제 사업과 어긋나는 회사(예: 팹리스 장비사를 Semiconductor 로 묶는 경우)에서 더 낫다.
+
+    레버드베타를 그냥 평균내지 않는다 — 자본구조가 제각각인 회사들의 βL 평균은 아무 회사의
+    자본구조도 아니다. 각자 무차입화(Hamada) → 중앙값 → 대상 자본구조로 재레버리지가 정석이다.
+
+    R² 가 기준 미달이거나 자본구조를 못 구한 Peer 는 **버리고 이유를 남긴다.** 조용히 섞으면
+    표본 수만 늘고 근거는 약해진다.
+    """
+    names = [str(p).strip() for p in (peers or []) if str(p).strip()]
+    if len(names) < PEER_MIN:
+        raise DataError(f"Peer 는 최소 {PEER_MIN}개 필요합니다 (받은 값: {len(names)}개). "
+                        f"같은 사업을 하는 상장사를 더 넣으세요.")
+    mkt = (market or country or "KR").strip().upper()
+    symbols = symbols or {}
+
+    tax_v = damodaran.corporate_tax_rate(country)
+    tax = float(tax_rate_pct) if tax_rate_pct is not None else tax_v.value
+
+    used: list[dict] = []
+    dropped: list[str] = []
+    for name in names:
+        try:
+            reg = regression_beta(name, market=mkt, index=index, symbol=symbols.get(name))
+        except DataError as e:
+            dropped.append(f"{name}(회귀 불가: {e})")
+            continue
+        r2v = (reg.extras or {}).get("r_squared")
+        r2 = r2v.value if r2v else None
+        if r2 is not None and r2 < R2_MIN:
+            dropped.append(f"{name}(R² {r2:.3f} < {R2_MIN})")
+            continue
+        try:
+            de = _de_ratio_of(name, mkt)
+        except DataError as e:
+            dropped.append(f"{name}(자본구조 미확보: {e})")
+            continue
+        used.append({"name": name, "bl": reg.value, "r2": r2, "de": de,
+                     "bu": unlever(reg.value, de, tax), "reg": reg})
+
+    if len(used) < PEER_MIN:
+        raise DataError(
+            f"쓸 수 있는 Peer 가 {len(used)}개뿐입니다(최소 {PEER_MIN}). "
+            f"제외: {', '.join(dropped) or '없음'}. Peer 를 더 넣거나 Damodaran 산업베타를 쓰세요.")
+
+    bus = [u["bu"] for u in used]
+    bu_med, bu_mean = _median(bus), sum(bus) / len(bus)
+
+    if target_de_ratio is not None:
+        target_de, de_src = float(target_de_ratio), "직접 지정"
+    elif target_company:
+        target_de = _de_ratio_of(target_company, mkt)
+        de_src = f"{target_company} 시장가치 D/E"
+    else:
+        target_de = _median([u["de"] for u in used])
+        de_src = "Peer 중앙값 D/E"
+
+    bl = relever(bu_med, target_de, tax)
+
+    def _row(u: dict) -> str:
+        r2s = "" if u["r2"] is None else f" R² {u['r2']:.3f}"
+        return (f"{u['name']} βL {u['bl']:.3f} / D-E {u['de']:.3f} / "
+                f"βU {u['bu']:.3f}{r2s}")
+
+    rows = " · ".join(_row(u) for u in used)
+    note = (
+        f"Bottom-up: Peer {len(used)}개의 βU 중앙값 {bu_med:.4f}(평균 {bu_mean:.4f})를 "
+        f"대상 D/E {target_de:.4f}({de_src})로 재레버리지 → βL {bl:.4f}. "
+        f"세율 {tax:.2f}%({'직접 지정' if tax_rate_pct is not None else tax_v.provenance.source}). "
+        f"각 Peer: {rows}."
+        + (f" 제외 {len(dropped)}개: {', '.join(dropped)}." if dropped else "")
+        + (f" ⚠️ 표본이 {len(used)}개로 얇습니다(권장 {PEER_THIN}개 이상) — "
+           f"한 회사가 중앙값을 좌우합니다." if len(used) < PEER_THIN else "")
+    )
+
+    extras: dict[str, Value] = {
+        "unlevered_beta_median": Value(round(bu_med, 4), "배", label="Peer βU 중앙값",
+                                       provenance=Provenance(
+                                           source="계산엔진(engines.beta · peer)",
+                                           source_type=SourceType.COMPUTED,
+                                           source_url="(computed)", note="Hamada 무차입화 후 중앙값")),
+        "unlevered_beta_mean": Value(round(bu_mean, 4), "배", label="Peer βU 평균",
+                                     provenance=Provenance(
+                                         source="계산엔진(engines.beta · peer)",
+                                         source_type=SourceType.COMPUTED,
+                                         source_url="(computed)", note="참고용 — 헤드라인은 중앙값")),
+        "target_de_ratio": Value(round(target_de, 4), "배", label="재레버리지 D/E",
+                                 provenance=Provenance(
+                                     source="계산엔진(engines.beta · peer)",
+                                     source_type=SourceType.COMPUTED,
+                                     source_url="(computed)", note=de_src)),
+        "peers_used": Value(len(used), "개사", label="사용한 Peer 수",
+                            provenance=Provenance(source="계산엔진(engines.beta · peer)",
+                                                  source_type=SourceType.COMPUTED,
+                                                  source_url="(computed)",
+                                                  note=", ".join(u["name"] for u in used))),
+    }
+    for u in used:
+        extras[f"beta_{u['name']}"] = u["reg"]
+
+    return Value(
+        round(bl, 4), "배", label=f"Peer 평균 베타 ({len(used)}개사, bottom-up)",
+        provenance=Provenance(
+            source="계산엔진(engines.beta · Peer bottom-up)", source_type=SourceType.COMPUTED,
+            source_url="(computed: Peer 회귀베타 → 무차입화 → 재레버리지)",
+            as_of=used[0]["reg"].provenance.as_of, note=note),
+        extras=extras,
+    )
+
+
 def beta_for(company: str, industry: str | None = None, country: str = "KR",
              period: str | None = None, years: int | None = None, index: str = "KOSPI",
              market: str | None = None, symbol: str | None = None) -> Value:

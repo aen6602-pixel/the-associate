@@ -104,9 +104,11 @@ def test_wacc_auto_ignores_zero_beta_override(monkeypatch):
     seen = {}
 
     def fake(company, country, industry, tenor, beta_override, kd, dv, src,
-             market=None, symbol=None, risk_free_pct=None):
+             market=None, symbol=None, risk_free_pct=None,
+             beta_source="auto", peers=None):
         seen.update(beta_override=beta_override, industry=industry, kd=kd, dv=dv, src=src,
-                    market=market, symbol=symbol, risk_free_pct=risk_free_pct)
+                    market=market, symbol=symbol, risk_free_pct=risk_free_pct,
+                    beta_source=beta_source, peers=peers)
         return Value(9.0, "%", label="wacc",
                      provenance=Provenance(source="계산엔진", source_type=SourceType.COMPUTED,
                                            source_url="(computed)"))
@@ -120,6 +122,7 @@ def test_wacc_auto_ignores_zero_beta_override(monkeypatch):
     assert seen["beta_override"] is None
     assert seen["industry"] is None
     assert seen["kd"] is None and seen["dv"] is None
+    assert seen["beta_source"] == "auto" and seen["peers"] is None
     assert seen["src"] == "auto"
     # 시장·티커·Rf 도 같은 정규화를 받아야 한다 — 빈 문자열이 그대로 가면 라우팅이 깨진다.
     assert seen["market"] is None and seen["symbol"] is None

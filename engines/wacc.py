@@ -57,6 +57,13 @@ def compute_wacc(country: str, beta: float, cost_of_debt_pct: float,
         f"Kd(세후) {kd_after:.2f}% = {kd}% × (1 − 세율 {tax.value}%, Damodaran); "
         f"WACC = {(1-dv)*100:.0f}%×Ke + {dv*100:.0f}%×Kd(세후)."
     )
+    # 계산에 들어간 값을 **전부 개별 Value 로** 돌려준다. 예전에는 note 문장 안에만 있어서,
+    # 화면에 WACC 산출 근거를 표로 옮기려면 두뇌가 문장을 다시 타이핑해야 했다(그 과정에서
+    # 숫자가 어긋날 여지가 생긴다). 각 항목이 자기 출처·기준일을 달고 나가야 한다.
+    computed = lambda v, unit, label, why: Value(  # noqa: E731
+        v, unit, label=label,
+        provenance=Provenance(source="계산엔진(engines.wacc)", source_type=SourceType.COMPUTED,
+                              source_url="(computed)", as_of=rf.provenance.as_of, note=why))
     return Value(
         value=round(wacc, 2), unit="%", label=f"WACC ({country.upper()})",
         provenance=Provenance(
@@ -65,6 +72,20 @@ def compute_wacc(country: str, beta: float, cost_of_debt_pct: float,
             source_url="(computed from Rf+ERP+β+tax+구조)",
             note=note,
         ),
+        extras={
+            "risk_free": rf,
+            "equity_risk_premium": erp,
+            "tax_rate": tax,
+            "beta_used": computed(round(beta, 4), "배", "적용 베타 (βL)", "Ke 계산에 쓴 값"),
+            "cost_of_equity": computed(round(ke, 2), "%", "자기자본비용 (Ke)",
+                                       f"Rf {rf.value}% + β {beta} × ERP {erp.value}%"),
+            "cost_of_debt_pretax": computed(round(kd, 2), "%", "세전 타인자본비용 (Kd)",
+                                            "WACC 에 투입된 세전 Kd"),
+            "cost_of_debt_after_tax": computed(round(kd_after, 2), "%", "세후 타인자본비용",
+                                               f"{kd}% × (1 − 세율 {tax.value}%)"),
+            "debt_to_value": computed(round(dv, 4), "배", "부채비중 D/(D+E)",
+                                      f"자기자본비중 {1 - dv:.4f}"),
+        },
     )
 
 
@@ -117,7 +138,9 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
                       debt_to_value: float | None = None,
                       debt_ratio_source: str = "auto",
                       market: str | None = None, symbol: str | None = None,
-                      risk_free_pct: float | None = None) -> Value:
+                      risk_free_pct: float | None = None,
+                      beta_source: str = "auto",
+                      peers: list[str] | None = None) -> Value:
     """WACC 를 공시·시세에서 **자동으로** 구성한다.
 
     한국(market='KR')과 해외는 쓸 수 있는 소스가 다르다:
@@ -146,10 +169,36 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
                 f"(예: Apparel, Semiconductor). 또는 값을 직접 넘기세요.")
         return damodaran.industry_wacc(industry, region)
 
-    # 1) 베타
+    # 1) 베타 — 어느 경로로 잡을지는 사용자가 고를 수 있다(β 하나로 Ke 가 통째로 움직인다).
+    #   auto      : 회귀베타 우선, R² 미달이면 산업베타 (기존 동작)
+    #   regression: 자기 주가 회귀만
+    #   industry  : Damodaran 산업 무차입베타를 재레버리지
+    #   peer      : 지정한 상장 Peer 들의 bottom-up 베타
+    src = (beta_source or "auto").strip().lower()
+    if src not in ("auto", "regression", "industry", "peer"):
+        raise DataError(f"beta_source 는 auto/regression/industry/peer 중 하나입니다: {beta_source}")
     if beta_override is not None:
         beta_v, beta = None, float(beta_override)
         steps.append(f"β {beta} (직접 지정)")
+    elif src == "peer":
+        if not peers:
+            raise DataError("beta_source='peer' 에는 peers(상장 Peer 회사명 목록)가 필요합니다. "
+                            "같은 사업을 하는 상장사를 3개 이상 넣으세요.")
+        beta_v = beta_engine.peer_beta(list(peers), country=c, market=mkt,
+                                       target_company=company)
+        beta = beta_v.value
+        steps.append(f"β {beta} (Peer {len(peers)}개 bottom-up)")
+    elif src == "industry":
+        if not industry:
+            raise DataError("beta_source='industry' 에는 industry(Damodaran 산업명)가 필요합니다. "
+                            "예: Semiconductor, Apparel.")
+        beta_v = beta_engine.industry_beta(industry, c)
+        beta = beta_v.value
+        steps.append(f"β {beta} (Damodaran 산업베타)")
+    elif src == "regression":
+        beta_v = beta_engine.regression_beta(company, market=mkt, symbol=symbol)
+        beta = beta_v.value
+        steps.append(f"β {beta} (자기 주가 회귀 — 산업베타 전환 없음)")
     else:
         beta_v = beta_engine.beta_for(company, industry=industry, country=c,
                                       market=mkt, symbol=symbol)
@@ -226,7 +275,10 @@ def compute_wacc_auto(company: str, country: str = "KR", industry: str | None = 
         except Exception:  # noqa: BLE001
             pass
 
-    extras = {"beta": beta_v, "cost_of_debt": kd_v, "debt_to_value": dv_v}
+    # base(compute_wacc)가 만든 Rf·ERP·세율·Ke 등 계산 내역을 그대로 물려받고, 자동 도출에
+    # 쓴 원천 Value(회귀베타·시장 Kd·산업 D/V)를 덧붙인다. 둘이 겹치는 키는 원천이 이긴다.
+    extras = dict(base.extras or {})
+    extras.update({"beta": beta_v, "cost_of_debt": kd_v, "debt_to_value_source": dv_v})
     return Value(
         base.value, "%", label=f"{company} WACC (자동)",
         provenance=Provenance(

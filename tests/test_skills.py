@@ -67,12 +67,18 @@ def test_roster_has_names_but_not_bodies():
     assert len(roster) < 1000
 
 
-def test_system_prompt_stays_small():
+def test_system_prompt_carries_the_roster_not_the_body():
+    """절차서는 **목록만** 프롬프트에 있고 본문은 load_skill 로 들어와야 한다.
+
+    프롬프트 절대 상한은 test_feedback_bundle5.test_prompt_stays_within_the_size_budget
+    한 곳에서만 지킨다 — 예전에 여기서 `len(body) + 8000` 으로 걸어뒀는데, 상한이 관계없는
+    파일(절차서) 길이에 묶여 있어 절차서를 줄이면 프롬프트 예산이 같이 줄어들었다.
+    """
     p = brain._system_prompt()
+    body = skills.load("valuation-agent")["body"]
     assert "valuation-agent" in p, "절차서 목록은 프롬프트에 있어야 한다"
     assert "Gate 1" not in p, "본문은 load_skill 로만 들어와야 한다"
-    body = skills.load("valuation-agent")["body"]
-    assert len(p) < len(body) + 8000
+    assert body[:300] not in p, "절차서 본문이 프롬프트에 새고 있다"
 
 
 # ── 도구 배선 ─────────────────────────────────────────────────────

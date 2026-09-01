@@ -417,6 +417,16 @@ def _beta(company: str, industry: str | None = None, country: str = "KR",
     return v
 
 
+def _peer_beta(peers: list | None = None, target_company: str | None = None,
+               country: str = "KR", market: str | None = None,
+               target_de_ratio: float | None = None,
+               tax_rate_pct: float | None = None) -> Value:
+    return beta_engine.peer_beta(
+        list(peers or []), country=country, market=_blank(market),
+        target_company=_blank(target_company), target_de_ratio=_pos(target_de_ratio),
+        tax_rate_pct=_pos(tax_rate_pct))
+
+
 def _industry_benchmarks(industry: str, country: str = "KR") -> Value:
     """Damodaran 산업 평균(무차입베타·D/E·목표부채비중·실효세율)을 한 Value 로 묶어 돌려준다."""
     industry = _blank(industry)
@@ -443,13 +453,15 @@ def _wacc_auto(company: str, country: str = "KR", industry: str | None = None,
                beta_override: float | None = None, cost_of_debt_pct: float | None = None,
                debt_to_value: float | None = None,
                debt_ratio_source: str = "auto", market: str | None = None,
-               symbol: str | None = None, risk_free_pct: float | None = None) -> Value:
+               symbol: str | None = None, risk_free_pct: float | None = None,
+               beta_source: str = "auto", peers: list | None = None) -> Value:
     # 0 은 "지정 안 함" 으로 본다 — β=0·Kd=0·D/(D+E)=0 은 의미 없는 입력이고, 그대로 통과시키면
     # Rf 와 같은 WACC 가 조용히 나온다(실측: LLM 이 beta_override=0 을 넘겨 WACC 4.32% 산출).
     return wacc_engine.compute_wacc_auto(
         company, country, _blank(industry), "10Y", _pos(beta_override),
         _pos(cost_of_debt_pct), _pos(debt_to_value), _blank(debt_ratio_source) or "auto",
-        _blank(market), _blank(symbol), _pos(risk_free_pct))
+        _blank(market), _blank(symbol), _pos(risk_free_pct),
+        _blank(beta_source) or "auto", list(peers) if peers else None)
 
 
 # ── Skill (절차서) 로딩 ───────────────────────────────────────────
@@ -1580,6 +1592,45 @@ REGISTRY: dict[str, dict] = {
             },
         },
     },
+    "get_peer_beta": {
+        "fn": _peer_beta,
+        "schema": {
+            "name": "get_peer_beta",
+            "description": (
+                "**Bottom-up 베타** — 지정한 상장 Peer 들의 회귀베타를 각자의 자본구조로 "
+                "무차입화(Hamada)한 뒤 그 중앙값을 대상회사의 자본구조로 재레버리지한다. "
+                "레버드베타를 그냥 평균내지 않는다(자본구조가 제각각인 βL 평균은 어느 회사의 "
+                "자본구조도 아니다). "
+                "Damodaran 산업베타가 '이 산업 전체' 라면 이쪽은 '내가 고른 이 회사들' 이다 — "
+                "산업 분류가 실제 사업과 어긋날 때 더 낫다. R² 미달이거나 자본구조를 못 구한 "
+                "Peer 는 버리고 이유를 남긴다. 최소 3개, 권장 5~10개. 현재 국내(KR) 상장사만."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "peers": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "상장 Peer 회사명 목록(3개 이상, 10개 권장). "
+                                       "같은 사업·같은 수요를 보는 회사만 넣는다.",
+                    },
+                    "target_company": {
+                        "type": "string",
+                        "description": "베타를 구하려는 대상 회사. 이 회사의 시장가치 D/E 로 "
+                                       "재레버리지한다. 생략하면 Peer 중앙값 D/E 를 쓴다.",
+                    },
+                    "country": {"type": "string", "description": "국가 코드. 기본 KR (세율·ERP)."},
+                    "market": {"type": "string", "description": "시장 코드. 기본 country."},
+                    "target_de_ratio": {"type": "number",
+                                        "description": "재레버리지에 쓸 D/E 를 직접 지정."},
+                    "tax_rate_pct": {"type": "number",
+                                     "description": "무차입화·재레버리지에 쓸 세율 %. "
+                                                    "생략하면 Damodaran 국가 법인세율."},
+                },
+                "required": ["peers"],
+                "additionalProperties": False,
+            },
+        },
+    },
     "get_industry_benchmarks": {
         "fn": _industry_benchmarks,
         "schema": {
@@ -1635,6 +1686,20 @@ REGISTRY: dict[str, dict] = {
                         "type": "number",
                         "description": "무위험수익률 %를 직접 지정. Rf 조회는 KR·US 만 지원하므로 "
                                        "일본·대만 등은 해당 통화 국채수익률을 여기에 넣는다.",
+                    },
+                    "beta_source": {
+                        "type": "string",
+                        "enum": ["auto", "regression", "industry", "peer"],
+                        "description": ("베타 경로. auto(기본)=자기 주가 회귀, R² 미달이면 "
+                                        "Damodaran 산업베타로 전환. regression=회귀만(전환 없음). "
+                                        "industry=Damodaran 산업 무차입베타 재레버리지(industry 필요). "
+                                        "peer=지정한 상장 Peer 들의 bottom-up 베타(peers 필요). "
+                                        "β 하나로 Ke 가 통째로 움직이므로, 어느 경로를 썼는지 "
+                                        "답변에 반드시 밝힌다."),
+                    },
+                    "peers": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "beta_source='peer' 일 때 쓸 상장 Peer 목록(3개 이상).",
                     },
                     "beta_override": {"type": "number", "description": "베타를 직접 지정."},
                     "cost_of_debt_pct": {"type": "number",
