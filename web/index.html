@@ -83,9 +83,9 @@
   <aside class="sidebar" id="sidebar">
     <div class="viewer-row" id="viewer-row" hidden>
       <span class="viewer" id="viewer-label"></span>
-      <button class="ghost sm" id="theme-btn" title="밝게/어둡게">◐</button>
+      <button class="ghost sm" id="logout-btn" title="로그아웃">Log out</button>
       <a class="ghost sm" id="admin-link" href="/admin" title="관리자 페이지" hidden>Admin</a>
-      <button class="ghost sm" id="logout-btn" title="로그아웃">Out</button>
+      <button class="ghost sm" id="theme-btn" title="밝게/어둡게">◐</button>
     </div>
 
     <!-- 홈 화면 설치. 안드로이드·데스크톱 Chrome 은 버튼으로, iOS 는 안내 문구로
@@ -93,26 +93,23 @@
     <button class="ghost wide" id="install-btn" hidden>📲&nbsp; 홈 화면에 앱으로 추가</button>
     <p class="hint" id="install-hint" hidden></p>
 
-    <!-- 공신력 없는 소스는 본 채팅에 섞지 않고 별도 화면으로 보낸다. -->
-    <a class="muse-link" href="/muse" title="구독 텔레그램 채널 브리핑 (별도 화면)">
-      📡 <b>Market Muse</b> — 구독 채널 브리핑
-      <span class="hint" style="margin:.15rem 0 0">공시 아님 · 전언 · 기록 분리</span>
-    </a>
-
-    <div class="sec">Conversations</div>
+    <!-- 대화 목록은 쌓이면 사이드바 위쪽을 다 잡아먹는다 → 통째로 접을 수 있게. -->
+    <details class="conv" id="conv-box" open>
+      <summary class="sec">Conversations</summary>
+      <div class="session-list" id="session-list"></div>
+    </details>
     <button class="ghost wide" id="new-session">＋&nbsp; New session</button>
     <p class="warn" id="ephemeral-warn" hidden>⚠︎ Ephemeral storage — conversations reset on redeploy.</p>
-    <div class="session-list" id="session-list"></div>
 
     <div class="divider"></div>
 
     <div class="sec">Data Sources</div>
-    <p class="hint">Click any item for details. 🟢 official 🔵 reference · ✅ live ⬜ key needed 🔜 planned</p>
+    <p class="hint">Click any item for details.</p>
+    <p class="hint legend">🟢 official 🔵 reference · ✅ live ⬜ key needed 🔜 planned</p>
 
     <details class="engine" id="engine-box">
       <summary id="engine-summary">🧠 Engine</summary>
       <div class="engine-body">
-        <p class="hint">질문을 이해하고 <strong>어떤 도구(API)를 부를지</strong> 결정합니다. 숫자는 만들지 않습니다.</p>
         <label><span>제공사</span>
           <select id="provider-select"></select>
         </label>
@@ -127,6 +124,13 @@
         <p class="engine-key" id="engine-key"></p>
       </div>
     </details>
+
+    <!-- 공신력 없는 소스는 본 채팅에 섞지 않고 별도 화면으로 보낸다.
+         설명은 평소엔 접어두고 마우스를 올렸을 때만 띄운다. -->
+    <a class="muse-link" href="/muse">
+      📡 <b>Market Muse</b>
+      <span class="tip" role="tooltip">Telegram 경제/경영/투자 채널 브리핑</span>
+    </a>
 
     <div id="source-groups"></div>
 
@@ -197,22 +201,23 @@
     <div class="modal-body guide">
 
       <section>
-        <h3>이게 뭔가요</h3>
-        <p>애널리스트·회계법인 Associate가 하는 <strong>실행 업무</strong>를 대신합니다 —
-          공시를 뒤지고, 숫자를 모으고, 계산하고, 표로 정리하는 일입니다.
-          <strong>판단은 사람이 합니다.</strong> 어떤 회사를 어떤 방법으로 볼지, 그 성장 스토리를
-          믿을지는 여전히 당신 몫이고, 이 도구는 그 판단에 쓸 근거를 만들어 줍니다.</p>
-        <ul class="pillars">
-          <li><strong>숫자를 지어내지 않습니다.</strong> 모든 값은 DART·SEC·EDINET 같은 공개
-            소스에서 가져오고, 못 찾으면 채우는 대신 “못 찾았다”고 말합니다.</li>
-          <li><strong>출처가 끝까지 붙어 다닙니다.</strong> 값마다 출처·기준일·등급이 따라오고,
-            링크를 누르면 원문으로 갑니다.</li>
-          <li><strong>성립하지 않는 평가는 거절합니다.</strong> 이건 고장이 아니라 기능입니다(아래 참고).</li>
-        </ul>
+        <h3>1. Agent 소개</h3>
+        <p>IB·PE·회계법인의 <strong>Associate가 맡는 실행 업무</strong>를 대신하도록 만들었습니다 —
+          공시를 뒤지고, 숫자를 모으고, 계산하고, 표로 정리하는 일입니다.</p>
+        <p>범용 LLM이 내놓는 재무 수치는 그대로 쓰기 어렵습니다. 출처 없이 그럴듯한 값을 지어내는
+          할루시네이션이 섞이고, 검증되지 않은 그 한 줄이 모델 전체를 무너뜨리기 때문입니다.</p>
+        <p>그래서 이 에이전트는 <strong>공신력 있는 기관의 원문에서 읽은 값만</strong>으로 계산합니다.
+          한국 DART, 미국 SEC EDGAR, 일본 EDINET의 공시 원문에서 재무제표를 직접 파싱하고,
+          여기에 한국은행 ECOS·미 연준(FRED)·네이버 금융·Yahoo Finance의 금리·환율·시장가격을
+          결합해 밸류에이션과 인사이트를 만듭니다.</p>
+        <p>값을 못 찾으면 채우는 대신 <strong>“못 찾았다”고 말합니다.</strong> 모든 숫자에는
+          출처·기준일·등급이 따라붙고, 링크를 누르면 원문으로 갑니다.
+          <strong>판단은 사람의 몫입니다</strong> — 어떤 회사를 어떤 방법으로 볼지, 그 성장 스토리를
+          믿을지는 당신이 정하고, 이 도구는 그 판단에 쓸 근거를 만듭니다.</p>
       </section>
 
       <section>
-        <h3>이렇게 물어보세요</h3>
+        <h3>2. 이렇게 물어보세요</h3>
         <p class="hint">아래 예시를 누르면 입력창에 들어갑니다. 회사명만 바꿔 쓰시면 됩니다.</p>
 
         <div class="ex-group">
@@ -243,16 +248,16 @@
       </section>
 
       <section>
-        <h3>결과 읽는 법</h3>
-        <p><strong>숫자보다 등급을 먼저 보세요.</strong> 값마다 출처 등급이 붙습니다.</p>
-        <ul class="tiers">
-          <li><span class="t">🟢 공식</span> 정부·규제기관·거래소 (그대로 신뢰)</li>
-          <li><span class="t">🟢 원문</span> 공시 원문에서 직접 읽음 — 문서ID·인용 있음 (추정 아님)</li>
-          <li><span class="t">🔵 참조</span> 업계 표준 데이터셋(Damodaran 등)</li>
-          <li><span class="t">🟣 계산</span> 엔진이 계산한 파생값</li>
-          <li><span class="t">🟠 가정</span> 사용자가 준 가정</li>
-          <li><span class="t">🔴 LLM추정</span> <strong>소스 없음 — 반드시 검증하세요</strong></li>
-        </ul>
+        <h3>3. 결과 읽는 법</h3>
+        <p><strong>숫자보다 등급을 먼저 봅니다.</strong> 값마다 출처 등급이 붙습니다.</p>
+        <table class="tier-table">
+          <tr><td class="dot">🟢</td><th>공식</th><td>정부·규제기관·거래소 원본</td></tr>
+          <tr><td class="dot">🟢</td><th>원문</th><td>공시 원문 직접 파싱 — 문서ID·인용 포함</td></tr>
+          <tr><td class="dot">🔵</td><th>참조</th><td>업계 표준 데이터셋 (Damodaran 등)</td></tr>
+          <tr><td class="dot">🟣</td><th>계산</th><td>엔진 산출 파생값</td></tr>
+          <tr><td class="dot">🟠</td><th>가정</th><td>사용자 입력 가정</td></tr>
+          <tr><td class="dot">🔴</td><th>LLM추정</th><td>소스 없음 — 검증 필수</td></tr>
+        </table>
         <ul>
           <li>답변 위의 <strong>🔍 사용한 데이터 소스</strong>를 펼치면 어떤 API를 어떤 인자로 불러
             무슨 값을 받았는지 전부 보이고, 원문 링크로 바로 갈 수 있습니다.</li>
@@ -264,42 +269,32 @@
       </section>
 
       <section>
-        <h3>잘 쓰는 법</h3>
+        <h3>4. 운용 가이드</h3>
         <ul>
-          <li><strong>세션은 회사 단위로.</strong> 한 대화 안에서 검증한 값은 계속 유지됩니다.
-            회사를 바꿀 땐 New session을 누르세요.</li>
-          <li><strong>연도를 지정하지 마세요.</strong> 최신 회계연도를 알아서 찾습니다.
-            직접 넣으면 오히려 옛날 데이터가 나옵니다.</li>
-          <li><strong>해외 기업은 시장을 붙여서.</strong> <code>MU:US</code>, <code>7203:JP</code>,
-            <code>2330:TW</code> 처럼 쓰면 한 표에 섞어 비교할 수 있습니다.</li>
-          <li><strong>추론 강도</strong>는 단순 조회면 낮게, DCF·비교표면 높게(사이드바 Engine).</li>
-          <li>선택지 카드가 뜨면 눌러서 답하세요. 자유롭게 문장으로 답해도 됩니다.</li>
+          <li><strong>세션은 회사 단위.</strong> 한 세션에서 검증된 값은 유지됩니다.
+            대상 회사를 바꿀 땐 New session.</li>
+          <li><strong>회계연도는 지정하지 마세요.</strong> 최신 확정 연도를 자동 인식합니다.
+            연도를 직접 넣으면 과거 데이터가 반환됩니다.</li>
+          <li><strong>해외 기업은 시장 코드 병기.</strong> <code>MU:US</code>, <code>7203:JP</code>,
+            <code>2330:TW</code> — 한 표에서 교차 비교됩니다.</li>
+          <li><strong>추론 강도 조절.</strong> 단순 조회는 낮게, DCF·비교표는 높게 (사이드바 Engine).</li>
+          <li><strong>정식 산출물은 명시적으로 요청.</strong> “가치평가 보고서 써줘”로 요청하면
+            승인 단계가 포함된 절차서를 따릅니다. 그냥 물으면 즉시 계산해 답합니다.</li>
+          <li><strong>캡티브 금융이 섞인 회사</strong>(현대차·기아류)는 단일 DCF 대신 SOTP로 안내합니다.</li>
         </ul>
       </section>
 
       <section>
-        <h3>못 하는 것 (중요)</h3>
+        <h3>5. 커버리지 한계</h3>
         <ul>
-          <li><strong>1차 조사</strong> — 경영진 미팅, 채널 체크, 전문가 네트워크는 못 합니다.</li>
-          <li><strong>유료 데이터</strong> — Capital IQ·Bloomberg 컨센서스, <strong>거래사례(transaction comps)</strong>,
-            forward multiple은 없습니다.</li>
-          <li><strong>LBO·딜 구조 모델링</strong>은 다루지 않습니다.</li>
-          <li><strong>스토리를 만들지 못합니다</strong> — “왜 이 회사가 이 배수를 받아야 하는가”는 사람 몫입니다.</li>
-          <li><strong>커버리지 차이</strong> — 한국(공시 원문까지) ≫ 미국 &gt; 일본(핵심 6개 항목) &gt; 대만(2차 출처).</li>
+          <li><strong>1차 조사</strong> — 경영진 미팅, 채널 체크, 전문가 네트워크: 없음.</li>
+          <li><strong>유료 데이터</strong> — Capital IQ·Bloomberg 컨센서스,
+            거래사례(transaction comps), forward multiple: 미탑재.</li>
+          <li><strong>LBO·딜 구조 모델링</strong> — 미지원.</li>
+          <li><strong>내러티브</strong> — “왜 이 회사가 이 배수를 받아야 하는가”는 사람이 씁니다.</li>
+          <li><strong>데이터 심도</strong> — 한국(공시 원문 단위) ≫ 미국 &gt; 일본(핵심 6개 항목)
+            &gt; 대만(2차 출처).</li>
         </ul>
-      </section>
-
-      <section>
-        <h3>거절할 때가 있습니다 — 고장이 아닙니다</h3>
-        <p>마감에 쫓겨 저지르기 쉬운 실수를 막도록 만들어져 있습니다.</p>
-        <ul>
-          <li><strong>목표주가에 맞춘 기본안은 만들지 않습니다.</strong> 대신 “그 가격은 매출성장률
-            43.9%를 요구하는데 과거 최고가 23.9%”처럼 역산해서 알려줍니다 — IC에서 더 쓸모 있는 형태입니다.</li>
-          <li><strong>캡티브 금융이 섞인 회사</strong>(현대차·기아류)는 단일 DCF를 막고 SOTP로 안내합니다.</li>
-          <li><strong>계산이 성립하지 않으면</strong> 주당가치를 만들어내지 않고 <code>NM</code>과 사유를 냅니다.</li>
-        </ul>
-        <p class="hint">정식 산출물이 필요하면 “가치평가 보고서 써줘”처럼 요청하세요 —
-          승인 단계를 거치는 절차서를 따릅니다. 그냥 물어보면 바로 계산해서 답합니다.</p>
       </section>
 
       <p class="guide-foot">데이터 소스 현황과 두뇌(모델·추론 강도) 설정은 왼쪽 사이드바에 있습니다.</p>

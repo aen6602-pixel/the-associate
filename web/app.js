@@ -184,7 +184,7 @@ function renderEngine() {
       })
       .join('');
     rhint.textContent = '높이면 도구를 더 꼼꼼히 골라 다단계 밸류에이션에 유리하고, '
-      + '낮추면 단순 조회가 빨라집니다. 숫자는 어느 강도에서도 도구가 만듭니다.';
+      + '낮추면 단순 조회가 빨라집니다.';
   } else {
     state.reasoning = null;
   }
@@ -361,6 +361,17 @@ async function newSession() {
 }
 
 $('new-session').addEventListener('click', newSession);
+
+/* 대화 목록 접힘 상태 — 접어둔 사람이 새로고침 때마다 다시 접지 않게 기억한다. */
+(() => {
+  const box = $('conv-box');
+  try {
+    if (localStorage.getItem('assoc-conv-open') === '0') box.open = false;
+  } catch (_) { /* 저장소를 못 읽으면 기본(펼침) */ }
+  box.addEventListener('toggle', () => {
+    try { localStorage.setItem('assoc-conv-open', box.open ? '1' : '0'); } catch (_) { /* 무시 */ }
+  });
+})();
 
 /* ── 대화 렌더 ───────────────────────────────────────── */
 function traceItemHtml(t) {
