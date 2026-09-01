@@ -33,7 +33,11 @@ _LABELS = {
     "revenue": {"매출액", "수익(매출액)", "영업수익"},
     "operating_income": {"영업이익", "영업이익(손실)"},
     "sga": {"판매비와관리비", "판매비및관리비", "판매관리비"},
+    "cogs": {"매출원가"},
+    "interest_expense": {"이자비용", "금융비용", "금융원가"},
+    "tax_expense": {"법인세비용", "법인세비용(수익)", "법인세비용(이익)"},
     # ── DCF 입력용 (재무상태표) ──
+    "ppe": {"유형자산", "유형자산(순액)"},
     "cash": {"현금및현금성자산", "현금및현금등가물"},
     "trade_receivables": {"매출채권", "매출채권및기타채권", "매출채권(순액)"},
     "inventories": {"재고자산"},
@@ -148,6 +152,11 @@ def _reports_map(corp_code: str) -> dict:
 
 def _extract_row(rows: list, item: str):
     """[당기, 전기] (오른쪽 2개 숫자) 또는 None."""
+    # 라벨이 없는 항목은 "감사보고서에서 못 찾음" 이지 프로그램 오류가 아니다. KeyError 를
+    # 그대로 올리면 호출부의 `except DataError` 를 뚫고 나가 화면에 `'ppe'` 같은 알맹이
+    # 없는 메시지로 끝난다(실측: 비상장사 DCF 엑셀 다운로드가 이렇게 깨졌다).
+    if item not in _LABELS:
+        raise DataError(f"감사보고서 파서가 모르는 항목: {item}")
     targets = {_norm(t) for t in _LABELS[item]}
     for cells in rows:
         label = _norm(next((c for c in cells if c.strip()), ""))

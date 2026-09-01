@@ -63,6 +63,24 @@ def _history(company: str, year: int | None) -> dict:
     }
 
 
+def _require_usable_history(h: dict, corp_name: str) -> None:
+    """5시트 모델은 **정기보고서 API 의 5개년 손익 시리즈**로만 세울 수 있다.
+
+    비상장사는 그 API 에 재무가 없어(감사보고서 파싱은 단년 항목만 대신한다) 시리즈가
+    통째로 비고, 그대로 두면 뒤쪽 계산에서 None 연산으로 알 수 없는 오류가 난다.
+    여기서 이유와 대안을 말하고 멈춘다.
+    """
+    need = {"revenue": "매출액", "cogs": "매출원가", "net_income": "당기순이익"}
+    thin = [ko for key, ko in need.items()
+            if sum(1 for v in h.get(key) or [] if v is not None) < 2]
+    if thin:
+        raise DataError(
+            f"{corp_name} 은(는) 정기보고서 5개년 손익 시리즈를 확보하지 못해 "
+            f"5시트 통합 모델을 만들 수 없습니다 (부족: {', '.join(thin)}). "
+            f"비상장사는 DART 에 정기보고서가 없어 흔히 발생합니다 — "
+            f"'DCF 요약 (1시트)' 또는 'HTML 리포트'를 사용하세요.")
+
+
 def build_full_model(company: str, assumptions: dict, year: int | None = None) -> dict:
     n_fore = int(assumptions.get("forecast_years", 5))
     wacc_pct = float(assumptions["wacc_pct"])
@@ -78,6 +96,7 @@ def build_full_model(company: str, assumptions: dict, year: int | None = None) -
 
     ent = dart.resolve(company)
     h = _history(company, year)
+    _require_usable_history(h, ent["corp_name"])
     end_yr = h["years"][0]
     # h 의 시리즈는 최신→과거 순, 화면 표시는 과거→최신이 자연스러우니 뒤집는다.
     hist_years = list(reversed(h["years"]))

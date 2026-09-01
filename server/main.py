@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from agent import brain
 from core import (admin, auth, config, health, history as hist, markdown, paths,
                   skills as skills_lib, sources)
+from core.schema import DataError
 
 log = logging.getLogger("associate")
 
@@ -420,7 +421,11 @@ def export(sid: str, body: ExportBody,
         raise
     except Exception as e:  # noqa: BLE001 — 엑셀 생성 실패를 500 이 아니라 메시지로
         log.exception("내보내기 실패")
-        raise HTTPException(status_code=400, detail=f"생성 실패: {e}") from e
+        # DataError 는 사람이 읽으라고 쓴 문장이라 그대로 내보낸다. 그 밖의 예외는 종류를
+        # 붙인다 — KeyError 는 str() 이 키 이름뿐이라 그냥 내보내면 화면에
+        # "생성 실패: 'ppe'" 처럼 원인을 알 수 없는 문구만 남는다(실측).
+        why = str(e) if isinstance(e, DataError) else f"{type(e).__name__}: {e}"
+        raise HTTPException(status_code=400, detail=f"생성 실패: {why}") from e
 
     raise HTTPException(status_code=400, detail=f"알 수 없는 내보내기 종류: {body.kind}")
 
