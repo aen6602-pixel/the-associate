@@ -405,24 +405,28 @@ function traceItemHtml(t) {
     ${extras}</div>`;
 }
 
-// 엑셀 종류 → 그 파일을 만들 수 있는 계산 도구. 계산하지 않은 방법의 버튼을 띄우면
-// 눌러도 400 이 나므로, 실제로 성공한 도구에 대응하는 것만 제안한다.
+// 엑셀 종류 → 그 파일을 만들 수 있는 계산 도구(우선순위 순). 계산하지 않은 방법의
+// 버튼을 띄우면 눌러도 400 이 나므로, 실제로 성공한 도구에 대응하는 것만 제안한다.
+// compute_scenarios 는 compute_dcf 와 같은 기본안 입력을 받으므로 Base 시나리오로
+// 같은 워크북을 만들 수 있다 — 시나리오로 돌리면 버튼이 아예 안 뜨던 것을 막는다.
 const EXPORT_KINDS = [
-  ['compute_dcf', 'dcf_full', '📥 DCF 전체 모델 (5시트)'],
-  ['compute_dcf', 'dcf', '📥 DCF 요약 (1시트)'],
-  ['compute_comps', 'comps', '📥 Comps 엑셀'],
-  ['evaluate_sangjeung_value', 'sangjeung', '📥 상증법 평가 엑셀'],
+  [['compute_dcf', 'compute_scenarios'], 'dcf_full', '📥 DCF 전체 모델 (5시트)'],
+  [['compute_dcf', 'compute_scenarios'], 'dcf', '📥 DCF 요약 (1시트)'],
+  [['compute_comps'], 'comps', '📥 Comps 엑셀'],
+  [['evaluate_sangjeung_value'], 'sangjeung', '📥 상증법 평가 엑셀'],
 ];
 
-/* 이 답변까지 거슬러 올라가며 그 도구가 **성공한** 가장 최근 메시지를 찾는다.
-   여러 번 돌렸으면 마지막 것 — 사용자가 마지막에 확정한 가정이 담긴 실행이다. */
-function lastRunIndex(upto, tool) {
+/* 이 답변까지 거슬러 올라가며 그 도구들 중 하나가 **성공한** 가장 최근 메시지를 찾는다.
+   여러 번 돌렸으면 마지막 것 — 사용자가 마지막에 확정한 가정이 담긴 실행이다.
+   → [메시지 index, 실제로 성공한 도구 이름] (없으면 [-1, null]) */
+function lastRunIndex(upto, tools) {
   for (let i = upto; i >= 0; i--) {
     const m = state.messages[i];
-    if (m && m.role === 'assistant'
-        && (m.trace || []).some((t) => t.name === tool && (t.result || {}).ok)) return i;
+    if (!m || m.role !== 'assistant') continue;
+    const hit = (m.trace || []).find((t) => tools.includes(t.name) && (t.result || {}).ok);
+    if (hit) return [i, hit.name];
   }
-  return -1;
+  return [-1, null];
 }
 
 function messageHtml(m, index) {
@@ -437,15 +441,20 @@ function messageHtml(m, index) {
   // trace 만 보느라, DCF 를 돌린 턴은 결정 카드 때문에 버튼이 숨겨지고 마지막 정리 턴은
   // trace 가 없어서, **끝나도 버튼이 영영 안 나왔다.**
   const xlsx = EXPORT_KINDS
-    .map(([tool, kind, label]) => [lastRunIndex(index, tool), kind, label])
+    .map(([tools, kind, label]) => {
+      const [at, via] = lastRunIndex(index, tools);
+      // 시나리오 실행으로 만든 파일은 Base 케이스다 — 라벨에 그대로 밝힌다.
+      const base = `${label.replace(/\s*\(.*\)$/, '')} (Base 시나리오)`;
+      return [at, kind, via === 'compute_scenarios' ? base : label];
+    })
     .filter(([at]) => at >= 0);
 
-  // 아직 답해야 할 decision 블록이 남아 있으면 중간 단계다 — 확정 전 가정으로 내보내지
-  // 않도록 그 답변에는 붙이지 않는다.
-  const hasPendingDecision = (m.html || '').includes('class="decision"');
   const isLast = index === state.messages.length - 1;
+  // decision 블록은 **마지막 답변에 있을 때만** 미결이다. 이미 답한 과거 턴의 카드까지
+  // 미결로 보면, 그 턴에서 실제로 돌린 계산의 엑셀 버튼이 영영 안 나온다.
+  const pendingDecision = isLast && (m.html || '').includes('class="decision"');
   // 자기 trace 가 있으면(그 턴의 산출물) 그 자리에, 없어도 마지막 답변이면 결론이므로 붙인다.
-  const show = !hasPendingDecision && (trace.length || (isLast && xlsx.length));
+  const show = !pendingDecision && (trace.length || (isLast && xlsx.length));
   const exports = show ? `<div class="exports">
       ${xlsx.map(([at, kind, label]) =>
         `<button class="ghost sm" data-export="${kind}" data-index="${at}">${label}</button>`).join('')}

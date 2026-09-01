@@ -96,12 +96,15 @@ def _tool_schema(name: str) -> dict:
     return next(s for s in registry.tool_schemas() if s["name"] == name)
 
 
-@pytest.mark.parametrize("kind", sorted(_XLSX_EXPORTS))
-def test_tool_input_binds_to_its_workbook_builder(kind):
+# (kind, tool) 전 조합 — 한 kind 가 여러 도구의 입력을 받으면 그 전부가 성립해야 한다
+# (compute_scenarios 입력으로도 DCF 워크북이 만들어져야 시나리오 대화에서 엑셀이 나온다).
+@pytest.mark.parametrize("kind,tool_name", sorted(
+    (k, t) for k, (tools, _b, _m) in _XLSX_EXPORTS.items() for t in tools))
+def test_tool_input_binds_to_its_workbook_builder(kind, tool_name):
     """도구가 낼 수 있는 모든 인자를 넣어도 생성기 호출이 성립해야 한다."""
     from excel import exporters
 
-    tool_name, builder_name, _ = _XLSX_EXPORTS[kind]
+    _tools, builder_name, _ = _XLSX_EXPORTS[kind]
     builder = getattr(exporters, builder_name)
     props = _tool_schema(tool_name)["input_schema"]["properties"]
 

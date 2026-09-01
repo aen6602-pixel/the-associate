@@ -291,12 +291,18 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # 내보내기 종류 → (필요한 tool 이름, 워크북 생성 함수 이름, MIME, 없을 때 안내)
 # 엑셀은 그 답변에서 **실제로 호출된 계산 도구의 입력을 그대로 재사용**해 만든다 —
 # 화면에 보인 숫자와 파일의 숫자가 어긋나지 않게 하려는 것이고, 클라이언트 입력을 믿지 않는다.
+# 값의 첫 원소는 **우선순위 순의 도구 목록**이다. compute_scenarios 는 compute_dcf 와
+# 같은 기본안 입력(성장·마진·WACC·순부채…)에 Bull/Bear 델타만 얹은 것이라, 그 입력으로
+# 그대로 DCF 워크북을 만들 수 있다(델타는 _adapt_to_builder 가 버린다). 시나리오로 돌린
+# 대화에서 엑셀 버튼이 아예 안 나오던 것을 막는다 — 이때 받는 파일은 **Base 시나리오**다.
 _XLSX_EXPORTS = {
-    "dcf_full": ("compute_dcf", "dcf_full_workbook", "이 답변에는 DCF 계산이 없습니다."),
-    "dcf": ("compute_dcf", "dcf_workbook", "이 답변에는 DCF 계산이 없습니다."),
-    "sangjeung": ("evaluate_sangjeung_value", "sangjeung_workbook",
+    "dcf_full": (("compute_dcf", "compute_scenarios"), "dcf_full_workbook",
+                 "이 답변에는 DCF 계산이 없습니다."),
+    "dcf": (("compute_dcf", "compute_scenarios"), "dcf_workbook",
+            "이 답변에는 DCF 계산이 없습니다."),
+    "sangjeung": (("evaluate_sangjeung_value",), "sangjeung_workbook",
                   "이 답변에는 상증법 평가가 없습니다."),
-    "comps": ("compute_comps", "comps_workbook", "이 답변에는 Comps 계산이 없습니다."),
+    "comps": (("compute_comps",), "comps_workbook", "이 답변에는 Comps 계산이 없습니다."),
 }
 
 
@@ -354,9 +360,9 @@ def export(sid: str, body: ExportBody,
     try:
         spec = _XLSX_EXPORTS.get(body.kind)
         if spec is not None:
-            tool_name, builder_name, missing = spec
-            call = next((t for t in trace
-                         if t["name"] == tool_name and t["result"].get("ok")), None)
+            tool_names, builder_name, missing = spec
+            call = next((t for name in tool_names for t in trace
+                         if t["name"] == name and t["result"].get("ok")), None)
             if call is None:
                 raise HTTPException(status_code=400, detail=missing)
             from excel import exporters
