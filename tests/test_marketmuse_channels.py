@@ -320,11 +320,13 @@ def test_brief_and_ask_keep_the_same_separate_history(team, chfile, db, monkeypa
     assert c.get("/api/sessions").json()["sessions"] == []
 
 
-def test_reading_one_new_channel_does_not_postpone_the_full_refresh(chfile, db, monkeypatch):
-    """한 채널만 읽고 수집 시각을 찍으면, 나머지 40개가 방금 갱신된 것처럼 보여
-    정기 재수집이 STALE_HOURS 만큼 미뤄진다."""
+@pytest.fixture
+def fake_telethon(monkeypatch):
+    """진짜 텔레그램 대신 무엇을 요청했는지만 기록하는 클라이언트."""
     import telethon
     import telethon.sessions
+
+    seen = {"dialogs": 0, "channels": []}
 
     class FakeClient:
         def __init__(self, *a, **k):
@@ -339,17 +341,49 @@ def test_reading_one_new_channel_does_not_postpone_the_full_refresh(chfile, db, 
         async def is_user_authorized(self):
             return True
 
-        def iter_messages(self, entity, limit=None):
+        def iter_dialogs(self):
+            seen["dialogs"] += 1
+
             async def _none():
                 return
                 yield  # pragma: no cover — 빈 async 이터레이터를 만들기 위한 형식
 
             return _none()
 
+        def iter_messages(self, entity, limit=None):
+            seen["channels"].append(entity)
+
+            async def _none():
+                return
+                yield  # pragma: no cover
+
+            return _none()
+
     monkeypatch.setattr(telethon, "TelegramClient", FakeClient)
     monkeypatch.setattr(telethon.sessions, "StringSession", lambda s=None: s)
     monkeypatch.setattr(tg, "_creds", lambda: (1, "hash", "session"))
+    return seen
 
+
+def test_numeric_channels_need_the_dialog_list_first(chfile, db, fake_telethon):
+    """공개 아이디가 없는 채널은 숫자 id 로만 부를 수 있는데, Telethon 은 캐시에 없는
+    숫자를 **사용자 id 로 해석해** 실패한다. 대화목록을 한 번 훑어야 읽힌다 —
+    실제로 하나증권 채널 하나가 이 이유로 수집에서 통째로 빠져 있었다."""
+    tg.collect()
+    assert fake_telethon["dialogs"] == 1
+    assert 1208429502 in fake_telethon["channels"], "숫자 id 는 int 로 넘어가야 한다"
+
+
+def test_handle_only_collection_skips_the_dialog_sweep(chfile, db, fake_telethon):
+    """대화목록 훑기는 공짜가 아니다 — 숫자 채널이 없으면 할 이유가 없다."""
+    tg.collect(only="@jake8lee")
+    assert fake_telethon["dialogs"] == 0
+    assert fake_telethon["channels"] == ["@jake8lee"]
+
+
+def test_reading_one_new_channel_does_not_postpone_the_full_refresh(chfile, db, fake_telethon):
+    """한 채널만 읽고 수집 시각을 찍으면, 나머지 40개가 방금 갱신된 것처럼 보여
+    정기 재수집이 STALE_HOURS 만큼 미뤄진다."""
     tg.collect(only="@jake8lee")
     assert tg.is_stale() is True, "채널 하나만 읽은 것으로 전체가 최신이 되면 안 된다"
     tg.collect()

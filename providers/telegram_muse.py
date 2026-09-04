@@ -264,6 +264,16 @@ async def _collect_async(only: str | None = None) -> dict:
     try:
         if not await client.is_user_authorized():
             raise DataError("텔레그램 세션이 만료됐습니다. `python _muse_login.py` 로 다시 만드세요.")
+
+        # 공개 아이디가 없는 채널은 숫자 id 로만 부를 수 있는데, Telethon 은 그 숫자를
+        # 캐시에서 못 찾으면 **사용자 id 로 해석해** 실패한다("Could not find the input
+        # entity for PeerUser"). 대화목록을 한 번 훑으면 캐시가 채워져 해결된다 —
+        # 세션 문자열은 매번 새로 만들어지므로 수집 때마다 한 번씩 필요하다.
+        if any(re.fullmatch(r"-?\d+", t) for t in targets):
+            _running["note"] = "대화목록 확인 중…"
+            async for _ in client.iter_dialogs():
+                pass
+
         for ch in targets:
             _running["note"] = f"{names.get(ch) or ch} 읽는 중…"
             try:
