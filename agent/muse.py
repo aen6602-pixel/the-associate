@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import json
+import os
 from typing import Iterator
 
 from core import config
@@ -43,15 +43,37 @@ SYSTEM_PROMPT = """\
 MAX_CONTEXT_CHARS = 18000
 MAX_HISTORY = 6
 
+# 짧은 후속 질문("그거 왜?")은 그 자체로 검색해봐야 아무것도 안 걸린다. 직전 질문을
+# 붙여서 찾되, 아무 짧은 문장에나 붙이면 엉뚱한 글이 딸려오므로 **명백한 지시어**가
+# 있을 때만 붙인다.
+_FOLLOWUP_CUES = (
+    "그거", "그건", "그게", "그것", "그 종목", "그 회사", "그 이유", "방금", "아까",
+    "위에", "거기", "자세히", "더 자세", "더 알려", "추가로", "이유는", "왜 그", "계속",
+)
+
+
+def _search_query(question: str, history: list[dict] | None) -> str:
+    """후속 질문이면 직전 사용자 질문을 검색어에 보탠다."""
+    prev = next((h["content"] for h in reversed(history or [])
+                 if h.get("role") == "user" and h.get("content")), None)
+    if not prev:
+        return question
+    if len(question) <= 6 or any(cue in question for cue in _FOLLOWUP_CUES):
+        return f"{prev} {question}"
+    return question
+
 
 def _context(posts: list[dict]) -> str:
     """근거 글 묶음. 길이 상한에 걸리면 **최신 것부터** 담아 뒤를 자른다."""
+    names = tg.aliases()
     out, used = [], 0
     for p in posts:
         body = tg.clean_text(p.get("text", ""))
         if not body:
             continue
-        block = f"[{p.get('channel', '?')} | {str(p.get('date', ''))[:10]}]\n{body}"
+        ch = p.get("channel", "?")
+        head = f"{names.get(ch) or ch} | {str(p.get('date', ''))[:10]}"
+        block = f"[{head}]\n{body}"
         if used + len(block) > MAX_CONTEXT_CHARS:
             break
         out.append(block)
@@ -59,34 +81,91 @@ def _context(posts: list[dict]) -> str:
     return "\n\n---\n\n".join(out)
 
 
+def _sources_event(posts: list[dict], names: dict) -> dict:
+    return {"type": "sources", "posts": [
+        {"channel": p.get("channel"), "alias": names.get(p.get("channel"), ""),
+         "date": p.get("date"), "excerpt": tg.clean_text(p.get("text", ""))[:180]}
+        for p in posts]}
+
+
 def answer(question: str, history: list[dict] | None = None,
            provider: str | None = None, model: str | None = None,
            channel: str | None = None) -> Iterator[dict]:
     """이벤트 스트림 — 본 채팅과 같은 모양이라 프론트가 로직을 공유한다.
-    {"type": "sources"|"final"|"error", ...}"""
+    {"type": "scope"|"sources"|"final"|"error", ...}"""
     provider = (provider or config.LLM_PROVIDER).lower()
+    names = tg.aliases()
+
+    # 화면에서 채널을 고르지 않았다면 질문이 채널을 지목하는지 본다
+    # ("잠실개미 채널에서 뭐래?" → 그 채널만).
+    detected = None
+    if not channel:
+        channel, detected = tg.detect_channel(question)
+    scope_label = (names.get(channel) or channel) if channel else None
+    if scope_label:
+        yield {"type": "scope", "channel": channel, "label": scope_label,
+               "auto": detected is not None}
 
     try:
-        posts = tg.search(question, limit=30, channel=channel)
+        posts = tg.search(_search_query(question, history), limit=30, channel=channel)
     except Exception as e:  # noqa: BLE001
         yield {"type": "error", "text": f"채널 데이터를 불러오지 못했습니다: {e}"}
         return
 
     if not posts:
+        where = f"'{scope_label}' 채널" if scope_label else "구독 채널 글"
         yield {"type": "final",
-               "text": "구독 채널 글에서 관련 내용을 찾지 못했습니다. "
+               "text": f"{where}에서 관련 내용을 찾지 못했습니다. "
                        "다른 표현이나 종목명으로 다시 물어봐 주세요."}
         return
 
-    yield {"type": "sources", "posts": [
-        {"channel": p.get("channel"), "date": p.get("date"),
-         "excerpt": tg.clean_text(p.get("text", ""))[:180]} for p in posts]}
+    yield _sources_event(posts, names)
 
     msgs = [{"role": h["role"], "content": h["content"]}
             for h in (history or [])[-MAX_HISTORY:] if h.get("content")]
+    scope = f"(사용자가 '{scope_label}' 채널을 지목했다 — 그 채널 글만 실려 있다)\n" if channel else ""
     msgs.append({"role": "user",
-                 "content": f"[채널 글]\n{_context(posts)}\n\n[질문]\n{question}"})
+                 "content": f"{scope}[채널 글]\n{_context(posts)}\n\n[질문]\n{question}"})
 
+    try:
+        text = _chat(provider, model, SYSTEM_PROMPT, msgs)
+    except Exception as e:  # noqa: BLE001
+        yield {"type": "error", "text": f"{provider} 호출 실패: {type(e).__name__}: {e}"}
+        return
+    yield {"type": "final", "text": text}
+
+
+BRIEF_LIMIT = int(os.getenv("MUSE_BRIEF_POSTS", "200"))
+
+
+def brief(provider: str | None = None, model: str | None = None,
+          channel: str | None = None) -> Iterator[dict]:
+    """질문 없이 '최근에 무슨 얘기가 도는지' 훑는다. 검색어가 없으니 관련도 순위가
+    의미 없어 **최신순 그대로** 넣고, 주제로 묶는 일은 모델에 맡긴다."""
+    provider = (provider or config.LLM_PROVIDER).lower()
+    names = tg.aliases()
+    try:
+        posts = tg.recent(limit=BRIEF_LIMIT, channel=channel)
+    except Exception as e:  # noqa: BLE001
+        yield {"type": "error", "text": f"채널 데이터를 불러오지 못했습니다: {e}"}
+        return
+    if not posts:
+        yield {"type": "final",
+               "text": "아직 모아둔 채널 글이 없습니다. 사이드바의 **지금 수집** 을 눌러주세요."}
+        return
+
+    if channel:
+        yield {"type": "scope", "channel": channel,
+               "label": names.get(channel) or channel, "auto": False}
+    yield _sources_event(posts[:30], names)
+
+    where = f"'{names.get(channel) or channel}' 채널의" if channel else "구독 채널들의"
+    msgs = [{"role": "user", "content":
+             f"[채널 글]\n{_context(posts)}\n\n[요청]\n위는 {where} 최근 글이다(최신순). "
+             "지금 시장에서 무슨 얘기가 돌고 있는지 **주제별로 묶어** 브리핑하라. "
+             "한 채널만 말한 얘기와 여러 채널이 함께 말한 얘기를 구분하고, "
+             "여러 채널이 겹쳐 다룬 주제를 위로 올려라. 종목명·수치·날짜를 살려서 쓰고, "
+             "각 항목 끝에 근거 채널명을 붙여라."}]
     try:
         text = _chat(provider, model, SYSTEM_PROMPT, msgs)
     except Exception as e:  # noqa: BLE001

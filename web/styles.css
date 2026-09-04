@@ -428,7 +428,27 @@ button:disabled { opacity: .5; cursor: default; }
 .ch { display: flex; justify-content: space-between; gap: .5rem; align-items: baseline;
       font-size: .76rem; color: var(--text-dim); padding: .18rem .1rem;
       border-bottom: 1px solid var(--line); }
-.ch code { color: var(--text-mute); font-size: .7rem; }
+.ch > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+             white-space: nowrap; }
+.ch code { color: var(--text-mute); font-size: .7rem; flex: 0 0 auto; }
+/* 지우기 버튼은 평소엔 숨어 있다 — 40줄에 ×가 도열해 있으면 목록이 안 읽힌다. */
+.ch-del { flex: 0 0 auto; border: 0; background: none; cursor: pointer; padding: 0 .2rem;
+          color: var(--text-mute); opacity: 0; transition: opacity .12s, color .12s; }
+.ch:hover .ch-del, .ch-del:focus-visible { opacity: 1; }
+.ch-del:hover { color: var(--red); }
+
+.muse-add { display: flex; flex-direction: column; gap: .3rem; margin-top: .7rem; }
+.muse-add input { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+                  padding: .35rem .45rem; font: inherit; font-size: .76rem; color: inherit; }
+
+/* 질문 없이 흐름부터 보고 싶은 사람을 위한 입구. */
+.muse-actions { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
+                margin: 1.1rem 0 .2rem; }
+
+/* 답이 어느 채널만 보고 나왔는지 — 답변 위에 항상 붙는다. */
+.muse-scope { background: var(--accent-bg); border: 1px solid var(--accent-line);
+              border-radius: 6px; padding: .4rem .55rem; font-size: .76rem;
+              margin-bottom: .6rem; }
 
 /* 본 화면에서 Market Muse 로 넘어가는 입구. 설명은 자리를 차지하지 않게 툴팁으로. */
 .muse-link { position: relative; display: block; width: 100%; text-align: left;

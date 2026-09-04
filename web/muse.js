@@ -11,7 +11,17 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const state = { sessionId: null, messages: [], sessions: [], channels: [], busy: false };
+const state = {
+  sessionId: null, messages: [], sessions: [],
+  channels: [],        // 실제로 글이 쌓인 채널 (수집 결과)
+  configured: [],      // 목록에 적힌 채널 (아직 못 읽은 것 포함)
+  aliases: {},         // 채널 → 별칭
+  canManage: false, busy: false,
+};
+
+/* 화면에는 `@jake8lee` 가 아니라 '잠실개미' 가 보여야 한다 — 40개를 아이디로 외우는
+ * 사람은 없다. 별칭이 없을 때만 아이디를 그대로 쓴다. */
+const chLabel = (id) => state.aliases[id] || id;
 
 async function api(path, options = {}) {
   const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
@@ -48,7 +58,14 @@ async function loadStatus() {
     return;
   }
   state.channels = d.channels || [];
-  $('ch-count').textContent = `(${state.channels.length}/${d.configured ?? 0})`;
+  state.configured = d.configured_channels || [];
+  state.aliases = {};
+  for (const c of state.configured) if (c.alias) state.aliases[c.id] = c.alias;
+  state.canManage = !!d.can_manage;
+  $('ch-add-form').hidden = !state.canManage;
+  $('collect-btn').hidden = !state.canManage;
+  $('ch-count').textContent =
+    `(${state.channels.length}/${state.configured.length || d.configured || 0})`;
 
   const when = d.collected_at
     ? String(d.collected_at).slice(0, 16).replace('T', ' ') : '아직 수집 안 함';
@@ -65,11 +82,35 @@ async function loadStatus() {
   const sel = $('channel-select');
   const keep = sel.value;
   sel.innerHTML = '<option value="">전체 채널</option>' + state.channels
-    .map((c) => `<option value="${esc(c.id)}">${esc(c.id)} (${c.n})</option>`).join('');
+    .map((c) => `<option value="${esc(c.id)}">${esc(chLabel(c.id))} (${c.n})</option>`).join('');
   sel.value = keep;
-  $('channel-list').innerHTML = state.channels.map((c) => `<div class="ch">
-      <span>${esc(c.id)}</span><code>${c.n}건 · ${esc(String(c.last || '').slice(0, 10))}</code>
-    </div>`).join('') || '<p class="hint">아직 모은 글이 없습니다.</p>';
+
+  // 아직 한 건도 못 읽은 채널도 함께 보여준다 — 방금 추가한 채널이 목록에서 빠지면
+  // 추가가 실패한 줄 알게 된다.
+  const collected = new Map(state.channels.map((c) => [c.id, c]));
+  const rows = state.configured.map(
+    (c) => ({ ...c, ...(collected.get(c.id) || { n: 0, last: '' }) }));
+  for (const c of state.channels) if (!rows.some((r) => r.id === c.id)) rows.push({ ...c });
+  rows.sort((a, b) => (b.n || 0) - (a.n || 0));
+
+  $('channel-list').innerHTML = rows.map((c) => `<div class="ch">
+      <span title="${esc(c.id)}">${esc(chLabel(c.id))}</span>
+      <code>${c.n ? `${c.n}건 · ${esc(String(c.last || '').slice(0, 10))}` : '아직 없음'}</code>
+      ${state.canManage ? `<button type="button" class="ch-del" data-del="${esc(c.id)}"
+          title="목록에서 빼고 모아둔 글도 지웁니다">×</button>` : ''}
+    </div>`).join('') || '<p class="hint">채널 목록이 비어 있습니다.</p>';
+
+  for (const b of document.querySelectorAll('[data-del]')) {
+    b.onclick = async () => {
+      const id = b.dataset.del;
+      if (!confirm(`'${chLabel(id)}' 를 목록에서 뺄까요?\n모아둔 글도 함께 지워집니다.`)) return;
+      b.disabled = true;
+      try {
+        await api(`/api/muse/channels/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        await loadStatus();
+      } catch (e) { alert(e.message); b.disabled = false; }
+    };
+  }
 
   clearTimeout(pollTimer);
   if (d.running || d.refresh_started) pollTimer = setTimeout(loadStatus, 3000);
@@ -85,6 +126,27 @@ $('collect-btn').addEventListener('click', async () => {
     alert(e.message);
   } finally {
     b.disabled = false;
+  }
+});
+
+$('ch-add-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const channel = $('ch-add-id').value.trim();
+  if (!channel) return;
+  const btn = e.target.querySelector('button');
+  btn.disabled = true;
+  try {
+    await api('/api/muse/channels', {
+      method: 'POST',
+      body: JSON.stringify({ channel, alias: $('ch-add-alias').value.trim() }),
+    });
+    $('ch-add-id').value = '';
+    $('ch-add-alias').value = '';
+    await loadStatus();   // 추가 직후 그 채널만 뒤에서 읽는 중 — 폴링이 붙는다
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -122,12 +184,21 @@ function renderSessions() {
 $('new-session').addEventListener('click', () => { newSession(); loadSessions(); });
 
 /* ── 렌더 ─────────────────────────────────────────────── */
+/* 어느 채널만 봤는지는 답변 자체만큼 중요하다 — 한 채널로 좁혀 놓고 '시장 전체가
+ * 이렇다' 로 읽으면 곤란하다. */
+function scopeHtml(scope) {
+  if (!scope || !scope.channel) return '';
+  const how = scope.auto ? '질문에서 채널 이름을 알아봤습니다' : '채널을 한정해 찾았습니다';
+  return `<div class="muse-scope">🎯 <strong>${esc(scope.label || scope.channel)}</strong>
+    채널 글에서만 찾았습니다 <span class="hint">— ${esc(how)}</span></div>`;
+}
+
 function postsHtml(posts) {
   if (!posts || !posts.length) return '';
   return `<details class="trace"><summary>📡 근거 채널 글 (${posts.length}건)</summary>
     <div class="trace-body">${posts.map((p) => `<div class="trace-item">
       <div class="head"><span class="tier">📡 채널</span>
-        <code>${esc(p.channel)}</code>
+        <code title="${esc(p.channel)}">${esc(p.alias || chLabel(p.channel))}</code>
         <span class="val">${esc(String(p.date || '').slice(0, 10))}</span></div>
       <div class="meta">${esc(p.excerpt || '')}…</div></div>`).join('')}</div></details>`;
 }
@@ -136,6 +207,7 @@ function render() {
   $('chat').innerHTML = state.messages.map((m) => (m.role === 'user'
     ? `<div class="msg user"><div class="avatar">You</div><div class="body">${esc(m.content)}</div></div>`
     : `<div class="msg assistant"><div class="avatar">M</div><div class="body">
+        ${scopeHtml(m.scope)}
         ${postsHtml(m.posts)}
         <div class="md">${m.html || esc(m.content)}</div>
         <div class="muse-foot">📡 구독 채널 전언 — 공시로 확인되지 않은 내용입니다.</div>
@@ -158,34 +230,44 @@ box.addEventListener('keydown', (e) => {
 composer.addEventListener('submit', (e) => {
   e.preventDefault();
   const q = box.value.trim();
-  if (q) ask(q);
+  if (!q) return;
+  box.value = '';
+  box.style.height = 'auto';
+  run('/api/muse/ask', { question: q, channel: $('channel-select').value || null },
+      q, '채널 글에서 찾는 중…');
 });
 
-async function ask(question) {
+$('brief-btn').addEventListener('click', () => {
+  const ch = $('channel-select').value || null;
+  const where = ch ? `'${chLabel(ch)}' 채널` : '구독 채널 전체';
+  run('/api/muse/brief', { channel: ch }, `📋 ${where}의 최근 흐름 브리핑`,
+      '최근 글을 주제별로 묶는 중… (수백 건이라 조금 걸립니다)');
+});
+
+/* 질문과 브리핑은 같은 스트림 모양이라 한 함수로 받는다. */
+async function run(path, body, userLabel, waiting) {
   if (state.busy) return;
   state.busy = true;
   $('send-btn').disabled = true;
-  box.value = '';
-  box.style.height = 'auto';
+  $('brief-btn').disabled = true;
 
-  state.messages.push({ role: 'user', content: question });
+  state.messages.push({ role: 'user', content: userLabel });
   render();
 
   const live = document.createElement('div');
   live.className = 'msg assistant';
   live.innerHTML = `<div class="avatar">M</div><div class="body">
-    <div class="hint"><span class="spinner"></span> 채널 글에서 찾는 중…</div></div>`;
+    <div class="hint"><span class="spinner"></span> ${esc(waiting)}</div></div>`;
   $('chat').appendChild(live);
 
   let posts = [];
+  let scope = null;
   let text = '';
   let html = '';
   try {
-    const res = await fetch('/api/muse/ask', {
+    const res = await fetch(path, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question, session_id: state.sessionId, channel: $('channel-select').value || null,
-      }),
+      body: JSON.stringify({ ...body, session_id: state.sessionId }),
     });
     if (!res.ok) {
       let detail = `${res.status} ${res.statusText}`;
@@ -207,7 +289,10 @@ async function ask(question) {
         if (!line.startsWith('data: ')) continue;
         const ev = JSON.parse(line.slice(6));
         if (ev.type === 'start') state.sessionId = ev.session_id;
-        else if (ev.type === 'sources') posts = ev.posts || [];
+        else if (ev.type === 'scope') {
+          scope = { channel: ev.channel, label: ev.label, auto: ev.auto };
+          live.querySelector('.body').insertAdjacentHTML('afterbegin', scopeHtml(scope));
+        } else if (ev.type === 'sources') posts = ev.posts || [];
         else if (ev.type === 'final') text = ev.text || '';
         else if (ev.type === 'final_html') html = ev.html || '';
         else if (ev.type === 'error') text = `⚠️ ${ev.text}`;
@@ -218,9 +303,10 @@ async function ask(question) {
     text = `⚠️ ${err.message}`;
   } finally {
     live.remove();
-    state.messages.push({ role: 'assistant', content: text, html, posts });
+    state.messages.push({ role: 'assistant', content: text, html, posts, scope });
     state.busy = false;
     $('send-btn').disabled = false;
+    $('brief-btn').disabled = false;
     render();
     renderSessions();
     box.focus();

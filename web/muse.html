@@ -44,6 +44,12 @@
       <select id="channel-select"><option value="">전체 채널</option></select>
     </label>
     <div id="channel-list"></div>
+
+    <form class="muse-add" id="ch-add-form" hidden>
+      <input id="ch-add-id" placeholder="@아이디 · t.me 링크 · 숫자 id" autocomplete="off">
+      <input id="ch-add-alias" placeholder="별칭 (예: 잠실개미)" autocomplete="off">
+      <button type="submit" class="ghost sm">＋ 채널 추가</button>
+    </form>
   </aside>
 
   <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
@@ -56,6 +62,12 @@
       <p class="warn box">여기서 나온 수치는 <strong>확정된 사실이 아니라 전언</strong>입니다.
         밸류에이션에 넣으려면 Associate 채팅에서 공시로 확인한 뒤 <strong>가정</strong>으로
         명시해 쓰세요.</p>
+
+      <div class="muse-actions">
+        <button type="button" class="ghost" id="brief-btn"
+                title="질문 없이 최근 글을 주제별로 묶어 봅니다">📋&nbsp; 최근 흐름 브리핑</button>
+        <span class="hint">묻고 싶은 게 아직 없을 때 — 요즘 무슨 얘기가 도는지부터 봅니다.</span>
+      </div>
 
       <div class="chat" id="chat"></div>
     </div>

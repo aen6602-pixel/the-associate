@@ -476,9 +476,26 @@ class MuseBody(BaseModel):
     model: str | None = None
 
 
+class MuseBriefBody(BaseModel):
+    session_id: str | None = None
+    channel: str | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+class MuseChannelBody(BaseModel):
+    channel: str = Field(min_length=2, max_length=120)
+    alias: str = Field(default="", max_length=80)
+
+
 def _muse_key(viewer: auth.Viewer) -> str:
     """대화기록을 본 채팅과 섞지 않는다 — 목록에 함께 뜨면 어느 쪽 근거인지 헷갈린다."""
     return f"{viewer.key}__muse"
+
+
+def _muse_admin(viewer: auth.Viewer) -> None:
+    if auth.is_configured() and not auth.is_admin(viewer):
+        raise HTTPException(status_code=403, detail="관리자만 실행할 수 있습니다.")
 
 
 @app.get("/api/muse/status")
@@ -489,7 +506,8 @@ def muse_status(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
     started = False
     if tg.is_stale() and not tg.collect_status()["running"]:
         started = tg.collect_in_background()
-    return {**tg.stats(), **tg.collect_status(), "refresh_started": started}
+    return {**tg.stats(), **tg.collect_status(), "refresh_started": started,
+            "can_manage": (not auth.is_configured()) or auth.is_admin(viewer)}
 
 
 @app.post("/api/muse/collect")
@@ -497,11 +515,37 @@ def muse_collect(viewer: auth.Viewer = Depends(current_viewer)) -> dict:
     """'지금 수집' — 관리자만. 텔레그램 rate-limit 이 있어 아무나 누르게 두지 않는다."""
     from providers import telegram_muse as tg
 
-    if auth.is_configured() and not auth.is_admin(viewer):
-        raise HTTPException(status_code=403, detail="수집은 관리자만 실행할 수 있습니다.")
+    _muse_admin(viewer)
     if not tg.collect_in_background():
         raise HTTPException(status_code=409, detail="이미 수집 중입니다.")
     return {"started": True}
+
+
+@app.post("/api/muse/channels")
+def muse_add_channel(body: MuseChannelBody,
+                     viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    """채널 추가. 목록에 넣자마자 그 채널만 뒤에서 읽어온다 — 다음 정기 수집까지
+    기다리면 방금 추가한 채널이 검색에 안 나와 추가가 실패한 것처럼 보인다."""
+    from providers import telegram_muse as tg
+
+    _muse_admin(viewer)
+    ch = tg.normalize(body.channel)
+    if not tg.add_channel(ch, body.alias):
+        raise HTTPException(status_code=409, detail=f"{ch} 는 이미 목록에 있습니다.")
+    tg.collect_in_background(only=ch)
+    return {"channel": ch, "alias": body.alias.strip(), "collecting": True}
+
+
+@app.delete("/api/muse/channels/{channel}")
+def muse_remove_channel(channel: str,
+                        viewer: auth.Viewer = Depends(current_viewer)) -> dict:
+    from providers import telegram_muse as tg
+
+    _muse_admin(viewer)
+    ch = tg.normalize(channel)
+    if not tg.remove_channel(ch):
+        raise HTTPException(status_code=404, detail=f"{ch} 는 목록에 없습니다.")
+    return {"channel": ch, "removed": True}
 
 
 @app.get("/api/muse/sessions")
@@ -518,44 +562,70 @@ def muse_session(sid: str, viewer: auth.Viewer = Depends(current_viewer)) -> dic
             "messages": _with_html(rec.get("messages", []))}
 
 
-@app.post("/api/muse/ask")
-def muse_ask(body: MuseBody, viewer: auth.Viewer = Depends(current_viewer)) -> StreamingResponse:
-    from agent import muse
-
-    sid = body.session_id or hist.new_session_id()
-    prior = list((hist.load_session(sid, _muse_key(viewer)) or {}).get("messages", []))
-    question = body.question.strip()
+def _muse_stream(events, sid: str, question: str, key: str) -> StreamingResponse:
+    """두 화면 동작(질문·브리핑)이 같은 이벤트 모양·같은 기록 저장을 쓰도록 한 곳에 둔다."""
+    prior = list((hist.load_session(sid, key) or {}).get("messages", []))
 
     def stream() -> Iterator[str]:
         yield _sse({"type": "start", "session_id": sid})
-        final_text, posts = "", []
+        final_text, posts, scope = "", [], None
         try:
-            for ev in muse.answer(question, prior, body.provider, body.model, body.channel):
+            for ev in events(prior):
                 if ev.get("type") == "sources":
                     posts = ev.get("posts") or []
+                elif ev.get("type") == "scope":
+                    scope = {"channel": ev.get("channel"), "label": ev.get("label"),
+                             "auto": ev.get("auto")}
                 elif ev.get("type") == "final":
                     final_text = ev.get("text") or ""
                 yield _sse(ev)
         except Exception as e:  # noqa: BLE001
-            log.exception("muse ask failed")
+            log.exception("muse stream failed")
             yield _sse({"type": "error", "text": str(e)})
 
         messages = prior + [
             {"role": "user", "content": question},
-            {"role": "assistant", "content": final_text, "posts": posts},
+            {"role": "assistant", "content": final_text, "posts": posts, "scope": scope},
         ]
-        hist.save_session(sid, messages, _muse_key(viewer))
+        hist.save_session(sid, messages, key)
         yield _sse({"type": "final_html", "html": markdown.render(final_text)})
         yield _sse({"type": "done", "session_id": sid,
-                    "sessions": hist.list_sessions(_muse_key(viewer))})
+                    "sessions": hist.list_sessions(key)})
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.post("/api/muse/ask")
+def muse_ask(body: MuseBody, viewer: auth.Viewer = Depends(current_viewer)) -> StreamingResponse:
+    from agent import muse
+
+    question = body.question.strip()
+    return _muse_stream(
+        lambda prior: muse.answer(question, prior, body.provider, body.model, body.channel),
+        body.session_id or hist.new_session_id(), question, _muse_key(viewer))
+
+
+@app.post("/api/muse/brief")
+def muse_brief(body: MuseBriefBody,
+               viewer: auth.Viewer = Depends(current_viewer)) -> StreamingResponse:
+    """질문 없이 최근 흐름을 훑는 브리핑. 기록에는 사람이 누른 것으로 남긴다 —
+    나중에 대화를 다시 열었을 때 이 답이 어디서 왔는지 알아야 하기 때문이다."""
+    from agent import muse
+    from providers import telegram_muse as tg
+
+    ch = tg.normalize(body.channel) if body.channel else None
+    where = f"'{tg.aliases().get(ch) or ch}' 채널" if ch else "구독 채널 전체"
+    return _muse_stream(
+        lambda _prior: muse.brief(body.provider, body.model, ch),
+        body.session_id or hist.new_session_id(),
+        f"📋 {where}의 최근 흐름 브리핑", _muse_key(viewer))
+
+
 @app.get("/muse", response_class=HTMLResponse)
 def muse_page() -> FileResponse:
     return FileResponse(WEB_DIR / "muse.html")
+
 
 
 # ── 데이터 소스 실측 점검 ────────────────────────────────────────

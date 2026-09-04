@@ -18,12 +18,16 @@ import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from core import config
 from core.schema import DataError
 
 DB_PATH = config.DATA_DIR / "muse.db"
-CHANNELS_FILE = config.ROOT / "muse_channels.txt"
+# 목록은 볼륨에 둔다 — 화면에서 채널을 더하고 빼도 재배포에 지워지지 않아야 한다.
+# 리포지토리의 파일은 **씨앗**이고, 볼륨에 아직 없을 때 한 번 복사된다.
+CHANNELS_FILE = config.DATA_DIR / "muse_channels.txt"
+CHANNELS_SEED = config.ROOT / "muse_channels.txt"
 
 # 한 번 수집할 때 채널당 최대 글 수 / 거슬러 올라갈 기간.
 # 채널이 40개 × 500건이면 2만 건 — LIKE 스캔으로 충분한 규모다(형태소 분석 불필요).
@@ -64,26 +68,141 @@ def _meta_set(key: str, value: str) -> None:
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
 
-def channels() -> list[str]:
-    """구독 채널 목록. '#' 주석과 빈 줄은 무시한다."""
-    if not CHANNELS_FILE.exists():
+# ── 채널 목록 ────────────────────────────────────────────────────
+# 한 줄에 하나. '#' 뒤는 **별칭**으로 쓴다 — 화면에는 `@jake8lee` 가 아니라 '잠실개미' 로
+# 보여야 하고, "잠실개미 채널에서 뭐래?" 같은 질문도 알아들어야 하기 때문이다.
+def _channels_path() -> Path:
+    """볼륨 사본을 쓰되, 없으면 리포지토리 씨앗을 한 번 복사한다."""
+    if not CHANNELS_FILE.exists() and CHANNELS_SEED.exists() and CHANNELS_FILE != CHANNELS_SEED:
+        CHANNELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CHANNELS_FILE.write_text(CHANNELS_SEED.read_text(encoding="utf-8"), encoding="utf-8")
+    return CHANNELS_FILE
+
+
+def normalize(token: str) -> str:
+    """입력을 DB 의 channel 컬럼과 같은 표준형으로: '@아이디' 또는 숫자 문자열.
+
+    사람이 붙여넣는 건 대개 `https://t.me/foo` 인데 Telethon 에도, 기존 DB 행에도
+    그 형태는 없다. 여기서 한 번 걸러야 같은 채널이 두 줄로 쌓이지 않는다."""
+    t = token.split("#", 1)[0].strip()
+    if t.startswith("http://") or t.startswith("https://"):
+        slug = t.rstrip("/").rsplit("/", 1)[-1]
+        t = slug if slug.startswith("+") else "@" + slug
+    if re.fullmatch(r"-?\d+", t):
+        return t
+    if t and not t.startswith(("@", "+")):
+        t = "@" + t
+    return t
+
+
+def _lines() -> list[tuple[str, str]]:
+    """[(표준형 채널, 별칭), ...] — 주석/빈 줄 제외."""
+    path = _channels_path()
+    if not path.exists():
         return []
     out = []
-    for line in CHANNELS_FILE.read_text(encoding="utf-8").splitlines():
-        s = line.split("#", 1)[0].strip()
-        if s:
-            out.append(s)
+    for line in path.read_text(encoding="utf-8").splitlines():
+        body, _, alias = line.partition("#")
+        body = body.strip()
+        if body:
+            out.append((normalize(body), alias.strip()))
     return out
 
 
+def channels() -> list[str]:
+    """구독 채널 목록(표준형)."""
+    return [ch for ch, _ in _lines()]
+
+
+def aliases() -> dict[str, str]:
+    """{채널: 별칭}. 별칭이 없으면 항목 자체가 없다."""
+    return {ch: alias for ch, alias in _lines() if alias}
+
+
+def label(ch: str) -> str:
+    """화면·프롬프트에 쓸 이름. 별칭이 있으면 '별칭(@아이디)'."""
+    alias = aliases().get(ch)
+    return f"{alias} ({ch})" if alias else ch
+
+
+def add_channel(token: str, alias: str = "") -> bool:
+    """목록에 추가. 이미 있으면 False. (실제 접근 가능 여부는 수집 때 드러난다)"""
+    norm = normalize(token)
+    if not norm or norm in channels():
+        return False
+    path = _channels_path()
+    prev = path.read_text(encoding="utf-8").rstrip("\n") if path.exists() else ""
+    line = f"{norm:<24} # {alias.strip()}" if alias.strip() else norm
+    path.write_text(f"{prev}\n{line}\n", encoding="utf-8")
+    return True
+
+
+def remove_channel(token: str) -> bool:
+    """목록에서 제거. 이미 모아둔 글도 함께 지운다 — 목록에서 뺐는데 검색에 계속
+    잡히면 뺀 게 아니다."""
+    path = _channels_path()
+    if not path.exists():
+        return False
+    norm = normalize(token)
+    kept, hit = [], False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        body = line.split("#", 1)[0].strip()
+        if body and normalize(body) == norm:
+            hit = True
+            continue
+        kept.append(line)
+    if not hit:
+        return False
+    path.write_text("\n".join(kept).rstrip("\n") + "\n", encoding="utf-8")
+    with _conn() as c:
+        c.execute("DELETE FROM posts WHERE channel = ?", (norm,))
+    return True
+
+
+# 별칭에서 채널을 특정하기엔 너무 흔해서 오탐을 부르는 낱말들.
+_CH_STOP = {
+    "주식", "투자", "시장", "리서치", "뉴스", "채널", "정보", "분석", "종목", "이야기",
+    "경제", "오늘", "요약", "정리", "research", "news", "invest", "stock", "market",
+    "미국", "한국", "글로벌", "일본", "중국", "korean", "stocks", "증권", "관심",
+}
+_CH_SPLIT_RE = re.compile(r"[\s&/|()·,.\-]+")
+
+
+def detect_channel(text: str) -> tuple[str | None, str | None]:
+    """질문이 특정 채널을 지목하는지 본다 → (채널, 별칭) 또는 (None, None).
+
+    두 개 이상 걸리면 어느 쪽인지 알 수 없으므로 전체 검색으로 둔다 — 임의로 하나를
+    고르면 사용자가 지목하지도 않은 채널만 근거로 답하게 된다."""
+    tl = (text or "").lower()
+    pairs = _lines()
+    for ch, _alias in pairs:                      # 1) '@아이디' 를 직접 쓴 경우 (확실)
+        if ch.startswith("@") and ch.lower() in tl:
+            return ch, aliases().get(ch)
+    hits = {}
+    for ch, alias in pairs:                       # 2) 별칭의 변별력 있는 토큰
+        if not alias:
+            continue
+        for tok in _CH_SPLIT_RE.split(alias):
+            tok = tok.strip()
+            if len(tok) >= 3 and tok.lower() not in _CH_STOP and tok.lower() in tl:
+                hits[ch] = alias
+                break
+    if len(hits) == 1:
+        ch, alias = next(iter(hits.items()))
+        return ch, alias
+    return None, None
+
 def stats() -> dict:
+    alias_map = aliases()
     with _conn() as c:
         n = c.execute("SELECT COUNT(*) n FROM posts").fetchone()["n"]
         chans = c.execute("SELECT channel, COUNT(*) n, MAX(date) last FROM posts "
                           "GROUP BY channel ORDER BY n DESC").fetchall()
     return {
         "count": n,
-        "channels": [{"id": r["channel"], "n": r["n"], "last": r["last"]} for r in chans],
+        "channels": [{"id": r["channel"], "alias": alias_map.get(r["channel"], ""),
+                      "n": r["n"], "last": r["last"]} for r in chans],
+        "configured_channels": [{"id": ch, "alias": al} for ch, al in _lines()],
         "configured": len(channels()),
         "collected_at": _meta_get("collected_at"),
         "last_error": _meta_get("last_error"),
@@ -136,6 +255,7 @@ async def _collect_async(only: str | None = None) -> dict:
     if not targets:
         raise DataError(f"채널 목록이 비어 있습니다: {CHANNELS_FILE.name} 를 채워주세요.")
 
+    names = aliases()
     since = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     added, errors = 0, []
 
@@ -145,7 +265,7 @@ async def _collect_async(only: str | None = None) -> dict:
         if not await client.is_user_authorized():
             raise DataError("텔레그램 세션이 만료됐습니다. `python _muse_login.py` 로 다시 만드세요.")
         for ch in targets:
-            _running["note"] = f"{ch} 읽는 중…"
+            _running["note"] = f"{names.get(ch) or ch} 읽는 중…"
             try:
                 # 채널 식별자는 '@핸들' 또는 숫자 id 로 온다. Telethon 은 숫자를 int 로 받는다.
                 entity = int(ch) if re.fullmatch(r"-?\d+", ch) else ch
@@ -164,7 +284,7 @@ async def _collect_async(only: str | None = None) -> dict:
                     after = c.execute("SELECT COUNT(*) n FROM posts").fetchone()["n"]
                 added += after - before
             except Exception as e:  # noqa: BLE001 — 채널 하나가 막혀도 나머지는 계속 모은다
-                errors.append(f"{ch}: {type(e).__name__}: {e}")
+                errors.append(f"{names.get(ch) or ch}: {type(e).__name__}: {e}")
     finally:
         await client.disconnect()
 
@@ -172,7 +292,10 @@ async def _collect_async(only: str | None = None) -> dict:
     with _conn() as c:
         c.execute("DELETE FROM posts WHERE date < ?", (since.isoformat(),))
 
-    _meta_set("collected_at", datetime.now(timezone.utc).isoformat())
+    # 채널 하나만 읽은 경우(방금 추가한 채널)에는 시각을 찍지 않는다 — 찍으면 나머지
+    # 40개가 방금 갱신된 것처럼 보여 정기 재수집이 STALE_HOURS 만큼 미뤄진다.
+    if not only:
+        _meta_set("collected_at", datetime.now(timezone.utc).isoformat())
     _meta_set("last_error", " / ".join(errors[:5]) if errors else "")
     return {"added": added, "errors": errors, "channels": len(targets)}
 
@@ -247,12 +370,24 @@ _SYNONYMS = _build_synonyms(_SYNONYM_SEED)
 _URL_RE = re.compile(r"https?://\S+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _MULTINL_RE = re.compile(r"\n{3,}")
+# 채널 글 대부분이 같은 구분선과 면책 문구를 달고 온다 — 수백 건을 프롬프트에 넣으면
+# 그 반복만으로 토큰이 꽤 나간다. 내용이 아니므로 걷어낸다.
+_DIVIDER_RE = re.compile(r"^[\s─=_–—\-]{4,}$", re.M)
+_DISCLAIMER_RES = [
+    re.compile(r"매수[-–]?매도.{0,12}투자권유.{0,40}않습니다\.?"),
+    re.compile(r"해당 게시물의 내용은 부정확할 수 있으며.{0,50}책임입니다\.?"),
+    re.compile(r"(해당 게시물의 내용은 )?어떤 경우에도 법적 근거로 사용될 수 없습니다\.?"),
+    re.compile(r"Not a financial advice", re.I),
+]
 
 
 def clean_text(text: str) -> str:
-    """URL·마크다운 기호·과한 공백만 걷어낸다. 내용은 건드리지 않는다."""
+    """URL·마크다운 기호·구분선·면책 문구·과한 공백만 걷어낸다. 내용은 건드리지 않는다."""
     t = _URL_RE.sub("", text or "")
+    for r in _DISCLAIMER_RES:
+        t = r.sub("", t)
     t = t.replace("***", "").replace("**", "").replace("*", "")
+    t = _DIVIDER_RE.sub("", t)
     t = _MULTINL_RE.sub("\n\n", _MULTISPACE_RE.sub(" ", t))
     return t.strip()
 
@@ -322,3 +457,26 @@ def search(query: str, limit: int = 30, channel: str | None = None) -> list[dict
         if len(out) >= limit:
             break
     return sorted(out, key=lambda r: r["date"], reverse=True)   # 프롬프트엔 최신부터
+
+
+def recent(limit: int = 300, channel: str | None = None) -> list[dict]:
+    """질문 없이 '최근 무슨 얘기가 도는지' 볼 때 쓴다(브리핑). 중복은 없애고 최신순."""
+    with _conn() as c:
+        sql = "SELECT channel,date,text,0 AS score FROM posts"
+        args: list = []
+        if channel:
+            sql += " WHERE channel = ?"
+            args.append(channel)
+        sql += " ORDER BY date DESC LIMIT ?"
+        args.append(limit * 3)
+        rows = [dict(r) for r in c.execute(sql, args).fetchall()]
+    seen, out = set(), []
+    for r in rows:
+        k = _dedup_key(r["text"])
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+        if len(out) >= limit:
+            break
+    return out
